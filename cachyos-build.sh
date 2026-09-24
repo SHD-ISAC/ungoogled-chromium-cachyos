@@ -25,12 +25,42 @@ docker run --rm \
     --pull=always \
     --name "$builder_name" \
     -e EXPORT_PKG=1 \
-    -e EXPORT_SRCINFO=1 \
-    -e SYNC_DATABASE=1 \
     -v "$repo_root:/pkg" \
     "$image" \
     /bin/bash -lc '
         set -euo pipefail
+
+        pacman_sync_retry() {
+            local attempt
+            for attempt in 1 2 3 4 5; do
+                echo "==> Repository sync attempt $attempt/5"
+                if sudo pacman -Syy --noconfirm; then
+                    return 0
+                fi
+                echo "warning: repository sync failed; discarding temporary sync databases before retry" >&2
+                sudo rm -f /var/lib/pacman/sync/*.db /var/lib/pacman/sync/*.db.sig \
+                           /var/lib/pacman/sync/*.files /var/lib/pacman/sync/*.files.sig
+                sleep $((attempt * 5))
+            done
+            echo "error: repository sync failed after 5 attempts" >&2
+            return 1
+        }
+
+        pacman_upgrade_retry() {
+            local attempt
+            for attempt in 1 2 3 4 5; do
+                echo "==> Full system upgrade attempt $attempt/5"
+                if sudo pacman -Syyu --noconfirm; then
+                    return 0
+                fi
+                echo "warning: full upgrade failed; refreshing repository databases before retry" >&2
+                sudo rm -f /var/lib/pacman/sync/*.db /var/lib/pacman/sync/*.db.sig \
+                           /var/lib/pacman/sync/*.files /var/lib/pacman/sync/*.files.sig
+                sleep $((attempt * 5))
+            done
+            echo "error: full system upgrade failed after 5 attempts" >&2
+            return 1
+        }
 
         echo "==> Preparing pacman inside the build container"
 
@@ -43,9 +73,7 @@ docker run --rm \
             echo "DisableSandbox" | sudo tee -a /etc/pacman.conf >/dev/null
         fi
 
-        # Bootstrap current signing trust before the image performs its full
-        # system upgrade. Re-populating an old keyring is not enough when new
-        # Arch packager keys have been added since this image was published.
+        # Bootstrap trust from the keyrings already present in the image.
         sudo pacman-key --init
         sudo pacman-key --populate archlinux
         if [[ -f /usr/share/pacman/keyrings/cachyos.gpg ]]; then
@@ -53,10 +81,10 @@ docker run --rm \
         fi
 
         echo "==> Updating repository databases and keyring packages first"
-        sudo pacman -Syy --noconfirm
+        pacman_sync_retry
 
-        # Arch recommends updating archlinux-keyring before a full upgrade
-        # when package signatures are newer than the local trust database.
+        # Update signing metadata before the full upgrade. Package signature
+        # checking remains enabled; this does not use TrustAll for Arch repos.
         keyring_packages=(archlinux-keyring)
         if pacman -Si cachyos-keyring >/dev/null 2>&1; then
             keyring_packages+=(cachyos-keyring)
@@ -68,17 +96,41 @@ docker run --rm \
             sudo pacman-key --populate cachyos
         fi
 
-        # Refresh CachyOS mirror ordering at build time. A stale/lagging
-        # mirror should not pin the build to 404s from an old mirror list.
+        # Refresh mirror ordering at build time. If one mirror is in the middle
+        # of syncing its database/signature pair, the retry logic below will
+        # discard the inconsistent copy and fetch it again.
         if command -v cachyos-rate-mirrors >/dev/null 2>&1; then
             sudo cachyos-rate-mirrors || true
         fi
 
-        # Discard package files fetched during bootstrap so /run.sh starts
-        # from a clean cache after the trust database has been refreshed.
-        sudo pacman -Scc --noconfirm || true
+        pacman_sync_retry
+        pacman_upgrade_retry
 
-        exec /run.sh
+        # Continue with the same build flow as the CachyOS image run.sh, but
+        # keep failures visible instead of swallowing makepkg errors.
+        rm -rf /tmp/pkg
+        cp -r /pkg /tmp/pkg
+        cd /tmp/pkg
+
+        mkdir -p /home/notroot/packages
+
+        if [[ -n "${CHECKSUMS:-}" ]]; then
+            echo "==> Updating checksums"
+            updpkgsums
+            makepkg --printsrcinfo > .SRCINFO
+        fi
+
+        if [[ -n "${USE_PARU:-}" ]]; then
+            paru -U --noconfirm --cleanafter
+        else
+            makepkg -sc --skipinteg --noconfirm --log
+        fi
+
+        if [[ -n "${EXPORT_PKG:-}" ]]; then
+            sudo chown "$(stat -c "%u:%g" /pkg/PKGBUILD)" /home/notroot/packages/* || true
+            sudo mv /home/notroot/packages/*.log /pkg/ || true
+            sudo mv /home/notroot/packages/*pkg.tar* /pkg/
+        fi
     '
 
 shopt -s nullglob
