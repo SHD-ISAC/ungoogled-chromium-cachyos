@@ -499,4 +499,5 @@ package() {
 }
 
 # CachyOS znver4 CI validation trigger
+# Retry after pinning GitHub Actions to immutable commit SHAs
 # vim:set ts=2 sw=2 et:
