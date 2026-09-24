@@ -1,12 +1,60 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
-readonly VERSION=$1
+readonly VERSION=${1:-}
 if [[ -z $VERSION ]]; then
   echo >&2 'No version given as an argument'
   exit 1
 fi
+
+retry() {
+  local attempts=${1}
+  local delay=${2}
+  shift 2
+
+  local n=1
+  until "$@"; do
+    local rc=$?
+    if (( n >= attempts )); then
+      echo >&2 "Command failed after $n attempts (exit $rc): $*"
+      return "$rc"
+    fi
+    echo >&2 "Attempt $n/$attempts failed (exit $rc); retrying in ${delay}s: $*"
+    sleep "$delay"
+    ((n++))
+  done
+}
+
+clone_retry() {
+  local dest=${1}
+  shift
+
+  local n=1
+  local attempts=5
+  while true; do
+    rm -rf "$dest"
+    if git clone "$@" "$dest"; then
+      return 0
+    fi
+
+    local rc=$?
+    if (( n >= attempts )); then
+      echo >&2 "git clone failed after $n attempts: $dest"
+      return "$rc"
+    fi
+
+    echo >&2 "git clone attempt $n/$attempts failed for $dest; retrying in 15s"
+    sleep 15
+    ((n++))
+  done
+}
+
+# Large Chromium fetches are more reliable through HTTP/1.1 on networks or
+# proxies that occasionally reset long-lived HTTP/2/TLS streams. Keep request
+# concurrency modest as well; build parallelism is unaffected.
+git config --global http.version HTTP/1.1
+git config --global http.maxRequests 4
 
 mkdir chromium-checkout
 cd chromium-checkout
@@ -22,13 +70,18 @@ solutions = [
 ]
 EOF
 
-git clone --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools
+clone_retry depot_tools --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools
 export PATH+=":$PWD/depot_tools" DEPOT_TOOLS_UPDATE=0
 # system python fails to load six.moves module
 #export VPYTHON_BYPASS='manually managed python not supported by chrome operations'
 
-git clone -b $VERSION --depth=2 https://chromium.googlesource.com/chromium/src
-gclient sync --no-history --nohooks
+clone_retry src -b "$VERSION" --depth=2 https://chromium.googlesource.com/chromium/src
+
+# gclient sync performs many additional Git/network fetches. Retrying it in
+# place allows already completed dependencies to be reused instead of throwing
+# away the entire checkout after a transient transport failure.
+retry 5 20 gclient sync --no-history --nohooks
+
 src/build/util/lastchange.py -o src/build/util/LASTCHANGE
 src/build/util/lastchange.py -m GPU_LISTS_VERSION \
   --revision-id-only --header src/gpu/config/gpu_lists_version.h
