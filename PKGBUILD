@@ -498,6 +498,4 @@ package() {
   install -Dvm644 LICENSE "$pkgdir/usr/share/licenses/chromium/LICENSE"
 }
 
-# CachyOS znver4 CI validation trigger
-# Retry after pinning GitHub Actions to immutable commit SHAs
 # vim:set ts=2 sw=2 et:

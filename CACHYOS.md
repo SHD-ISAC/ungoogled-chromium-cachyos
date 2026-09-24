@@ -117,6 +117,40 @@ git push --force-with-lease origin cachyos-znver4
 Because the CachyOS branch only adds build-layer files, rebases should normally
 remain simple.
 
+## GitHub Actions: self-hosted Zen4
+
+The `cachyos-znver4` branch intentionally uses **only** a self-hosted runner
+for the real browser build. GitHub-hosted x64 runners are not used because
+they do not reliably expose the AVX-512 feature set required by x86-64-v4.
+
+The runner must have all of these labels:
+
+```text
+self-hosted
+Linux
+X64
+zen4
+```
+
+The `zen4` label is custom and should only be assigned to a Zen 4-class
+machine intended for these builds. The workflow also verifies the required
+x86-64-v4 CPU flags before starting.
+
+Runner requirements:
+
+- Linux x86_64 on a Zen 4-class CPU
+- Docker available to the runner account without an interactive sudo prompt
+- `pacman` available on the host (CachyOS/Arch is recommended)
+- enough free RAM and disk space for a full Chromium build
+
+A successful branch build uploads the `.pkg.tar.zst` and `SHA256SUMS` as a
+GitHub Actions artifact. A tag matching `znver4-*` additionally publishes the
+same files as a GitHub Release.
+
+This workflow has no `pull_request` trigger. That is intentional: a
+self-hosted runner should not execute untrusted pull-request code from a public
+repository.
+
 ## Security
 
 Chromium is a high-exposure application. Rebuild promptly when the upstream
