@@ -43,9 +43,26 @@ docker run --rm \
             echo "DisableSandbox" | sudo tee -a /etc/pacman.conf >/dev/null
         fi
 
-        # Refresh trust from the keyring packages already present in the
-        # image before the image performs its full system upgrade.
+        # Bootstrap current signing trust before the image performs its full
+        # system upgrade. Re-populating an old keyring is not enough when new
+        # Arch packager keys have been added since this image was published.
         sudo pacman-key --init
+        sudo pacman-key --populate archlinux
+        if [[ -f /usr/share/pacman/keyrings/cachyos.gpg ]]; then
+            sudo pacman-key --populate cachyos
+        fi
+
+        echo "==> Updating repository databases and keyring packages first"
+        sudo pacman -Syy --noconfirm
+
+        # Arch recommends updating archlinux-keyring before a full upgrade
+        # when package signatures are newer than the local trust database.
+        keyring_packages=(archlinux-keyring)
+        if pacman -Si cachyos-keyring >/dev/null 2>&1; then
+            keyring_packages+=(cachyos-keyring)
+        fi
+        sudo pacman -S --needed --noconfirm "${keyring_packages[@]}"
+
         sudo pacman-key --populate archlinux
         if [[ -f /usr/share/pacman/keyrings/cachyos.gpg ]]; then
             sudo pacman-key --populate cachyos
@@ -56,6 +73,10 @@ docker run --rm \
         if command -v cachyos-rate-mirrors >/dev/null 2>&1; then
             sudo cachyos-rate-mirrors || true
         fi
+
+        # Discard package files fetched during bootstrap so /run.sh starts
+        # from a clean cache after the trust database has been refreshed.
+        sudo pacman -Scc --noconfirm || true
 
         exec /run.sh
     '
