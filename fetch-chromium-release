@@ -51,10 +51,14 @@ clone_retry() {
 }
 
 # Large Chromium fetches are more reliable through HTTP/1.1 on networks or
-# proxies that occasionally reset long-lived HTTP/2/TLS streams. Keep request
-# concurrency modest as well; build parallelism is unaffected.
-git config --global http.version HTTP/1.1
-git config --global http.maxRequests 4
+# proxies that occasionally reset long-lived HTTP/2/TLS streams. Pass these
+# settings through Git's environment config so makepkg does not need a writable
+# global Git config or HOME; gclient child Git processes inherit them too.
+export GIT_CONFIG_COUNT=2
+export GIT_CONFIG_KEY_0=http.version
+export GIT_CONFIG_VALUE_0=HTTP/1.1
+export GIT_CONFIG_KEY_1=http.maxRequests
+export GIT_CONFIG_VALUE_1=4
 
 mkdir chromium-checkout
 cd chromium-checkout
