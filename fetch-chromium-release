@@ -8,6 +8,19 @@ if [[ -z $VERSION ]]; then
   exit 1
 fi
 
+# A self-hosted builder can prefetch the complete source tree once and mount it
+# read-only at build time. This keeps GitHub runner connectivity independent
+# from the network path used to reach Chromium/Google infrastructure.
+if [[ -n ${CHROMIUM_SOURCE_CACHE:-} ]]; then
+  readonly cached_source="${CHROMIUM_SOURCE_CACHE}/chromium-${VERSION}"
+  if [[ -f "${cached_source}/.ungoogled-chromium-cache-complete" ]]; then
+    echo "Using prefetched Chromium source cache: $cached_source"
+    cp -a --reflink=auto "$cached_source" "chromium-$VERSION"
+    rm -f "chromium-$VERSION/.ungoogled-chromium-cache-complete"
+    exit 0
+  fi
+fi
+
 retry() {
   local attempts=${1}
   local delay=${2}
