@@ -85,7 +85,8 @@ docker run --rm \
             git python python-httplib2 python-pyparsing python-six python-requests \
             python-urllib3 python-idna python-yaml python-lxml python-pygments \
             python-pytest python-coverage python-packaging python-brotli \
-            npm rsync
+            python-hjson python-parameterized python-colorama python-sqlparse \
+            python-pluggy python-iniconfig npm rsync
 
         cd /work
         /repo/fetch-chromium-release "$CHROMIUM_VERSION"
