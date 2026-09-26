@@ -82,11 +82,21 @@ docker run --rm \
         fi
 
         retry 5 15 sudo pacman -Syu --needed --noconfirm \
-            git python python-httplib2 python-pyparsing python-six python-requests \
+            git python python313 python-httplib2 python-pyparsing python-six python-requests \
             python-urllib3 python-idna python-yaml python-lxml python-pygments \
             python-pytest python-coverage python-packaging python-brotli \
             python-hjson python-parameterized python-colorama python-sqlparse \
             python-pluggy python-iniconfig npm rsync
+
+        # VPYTHON_BYPASS makes depot_tools use the system Python. CachyOS
+        # currently ships Python 3.14 as /usr/bin/python3, while depot_tools
+        # gsutil supports only Python 3.9-3.13. Put a private Python 3.13 shim
+        # first in PATH for this prefetch process only; the host and normal
+        # CachyOS build environment remain unchanged.
+        mkdir -p /tmp/chromium-python
+        ln -sf /usr/bin/python3.13 /tmp/chromium-python/python3
+        export PATH="/tmp/chromium-python:$PATH"
+        echo "==> depot_tools Python: $(python3 --version)"
 
         cd /work
         /repo/fetch-chromium-release "$CHROMIUM_VERSION"
