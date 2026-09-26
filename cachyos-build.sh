@@ -17,15 +17,21 @@ if [[ ! -f PKGBUILD ]]; then
     exit 1
 fi
 
+cache_root="${CHROMIUM_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/ungoogled-chromium-cachyos/chromium-source}"
+mkdir -p "$cache_root"
+
 echo "==> Build image: $image"
 echo "==> Source tree: $repo_root"
+echo "==> Chromium source cache: $cache_root"
 echo "==> Building ungoogled-chromium in the official CachyOS makepkg environment"
 
 docker run --rm \
     --pull=always \
     --name "$builder_name" \
     -e EXPORT_PKG=1 \
+    -e CHROMIUM_SOURCE_CACHE=/source-cache \
     -v "$repo_root:/pkg" \
+    -v "$cache_root:/source-cache:ro" \
     "$image" \
     /bin/bash -lc '
         set -euo pipefail
