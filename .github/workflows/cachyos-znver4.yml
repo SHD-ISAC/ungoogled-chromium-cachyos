@@ -161,10 +161,24 @@ jobs:
           compression-level: 0
           retention-days: 30
 
+      - name: Verify release token
+        if: ${{ startsWith(github.ref, 'refs/tags/znver4-') }}
+        shell: bash
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          [[ -n "$RELEASE_TOKEN" ]] || {
+            echo "::error::Repository secret RELEASE_TOKEN is required for releases from cachyos-znver4 because the target commit modifies .github/workflows relative to the default branch."
+            exit 1
+          }
+
       - name: Publish GitHub Release
         if: ${{ startsWith(github.ref, 'refs/tags/znver4-') }}
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
+          token: ${{ secrets.RELEASE_TOKEN }}
           name: ungoogled-chromium ${{ steps.meta.outputs.version }} — CachyOS znver4
           body: |
             Self-hosted Zen4 build of ungoogled-chromium for CachyOS.
