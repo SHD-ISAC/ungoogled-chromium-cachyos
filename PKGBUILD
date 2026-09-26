@@ -422,7 +422,7 @@ build() {
   msg2 'Configuring Chromium'
   gn gen out/Release --args="${_flags[*]}"
   msg2 'Building Chromium'
-  ninja -C out/Release chrome chrome_sandbox chromedriver
+  ninja -j8 -C out/Release chrome chrome_sandbox chromedriver
 }
 
 package() {
