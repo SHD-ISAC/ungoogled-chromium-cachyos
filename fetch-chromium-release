@@ -73,7 +73,7 @@ export GIT_CONFIG_VALUE_0=HTTP/1.1
 export GIT_CONFIG_KEY_1=http.maxRequests
 export GIT_CONFIG_VALUE_1=4
 
-mkdir chromium-checkout
+mkdir -p chromium-checkout
 cd chromium-checkout
 cat >.gclient <<EOF
 solutions = [
@@ -87,12 +87,19 @@ solutions = [
 ]
 EOF
 
-clone_retry depot_tools --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools
+if [[ -d depot_tools/.git ]]; then
+  echo "Reusing existing depot_tools checkout"
+else
+  clone_retry depot_tools --depth=1 https://chromium.googlesource.com/chromium/tools/depot_tools
+fi
 export PATH+=":$PWD/depot_tools" DEPOT_TOOLS_UPDATE=0
-# system python fails to load six.moves module
-#export VPYTHON_BYPASS='manually managed python not supported by chrome operations'
 
-clone_retry src -b "$VERSION" --depth=2 https://chromium.googlesource.com/chromium/src
+if [[ -d src/.git ]] && git -C src rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "Reusing existing Chromium checkout"
+else
+  rm -rf src
+  clone_retry src -b "$VERSION" --depth=2 https://chromium.googlesource.com/chromium/src
+fi
 
 # gclient sync performs many additional Git/network fetches. Retrying it in
 # place allows already completed dependencies to be reused instead of throwing
@@ -106,11 +113,11 @@ src/build/util/lastchange.py -m SKIA_COMMIT_HASH \
   -s src/third_party/skia --header src/skia/ext/skia_commit_hash.h
 src/build/util/lastchange.py \
   -s src/third_party/dawn --revision src/gpu/webgpu/DAWN_VERSION
-src/tools/update_pgo_profiles.py --target=linux update \
+retry 5 20 src/tools/update_pgo_profiles.py --target=linux update \
   --gs-url-base=chromium-optimization-profiles/pgo_profiles
 
 # https://gitlab.archlinux.org/archlinux/packaging/packages/electron32/-/issues/1
-src/third_party/node/update_npm_deps
+retry 5 20 src/third_party/node/update_npm_deps
 
 rm -rf src/third_party/node/linux/node-linux-x64/bin/
 find src/third_party/jdk/current -type f -delete
