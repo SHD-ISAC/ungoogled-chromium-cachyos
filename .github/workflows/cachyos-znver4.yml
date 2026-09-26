@@ -1,6 +1,13 @@
 name: Build CachyOS znver4 on self-hosted Zen4
 
 on:
+  workflow_dispatch:
+    inputs:
+      existing_package_path:
+        description: 'Absolute path to an existing .pkg.tar.zst on this self-hosted runner; leave empty to build normally'
+        required: false
+        type: string
+        default: ''
   push:
     branches:
       - cachyos-znver4
@@ -11,7 +18,6 @@ on:
       - '*.patch'
       - fetch-chromium-release
       - cachyos-build.sh
-      - .github/workflows/cachyos-znver4.yml
 
 permissions:
   contents: write
@@ -61,7 +67,24 @@ jobs:
         run: |
           rm -f ./ungoogled-chromium-*.pkg.tar.zst ./SHA256SUMS
 
+      - name: Reuse existing package
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.existing_package_path != '' }}
+        shell: bash
+        env:
+          EXISTING_PACKAGE_PATH: ${{ inputs.existing_package_path }}
+        run: |
+          set -euo pipefail
+
+          [[ -f "$EXISTING_PACKAGE_PATH" ]] || {
+            echo "Existing package not found: $EXISTING_PACKAGE_PATH" >&2
+            exit 1
+          }
+
+          cp --reflink=auto "$EXISTING_PACKAGE_PATH" ./
+          echo "Reusing existing package: $(basename "$EXISTING_PACKAGE_PATH")"
+
       - name: Build with official CachyOS znver4 environment
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.existing_package_path == '' }}
         shell: bash
         run: ./cachyos-build.sh
 
@@ -82,7 +105,7 @@ jobs:
             echo "==> $pkg"
             pacman -Qip "$pkg" | grep -E '^(Name|Version|Architecture|Packager)'
 
-            arch="$(pacman -Qip "$pkg" | awk -F ': *' '$1 == "Architecture" { print $2; exit }')"
+            arch="$(pacman -Qip "$pkg" | sed -n 's/^Architecture[[:space:]]*:[[:space:]]*//p' | head -n1)"
             [[ "$arch" == "x86_64_v4" ]] || {
               echo "Unexpected package architecture: $arch" >&2
               exit 1
