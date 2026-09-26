@@ -25,7 +25,6 @@ if [[ -f "$target/.ungoogled-chromium-cache-complete" ]]; then
     exit 0
 fi
 
-rm -rf "$stage"
 mkdir -p "$stage"
 
 echo "==> Prefetching Chromium $version"
@@ -38,6 +37,7 @@ docker run --rm \
     --pull=always \
     -e CHROMIUM_VERSION="$version" \
     -e GIT_CACHE_PATH=/git-cache \
+    -e VPYTHON_BYPASS="manually managed python not supported by chrome operations" \
     -v "$repo_root:/repo:ro" \
     -v "$stage:/work" \
     -v "$git_cache:/git-cache" \
@@ -82,7 +82,10 @@ docker run --rm \
         fi
 
         retry 5 15 sudo pacman -Syu --needed --noconfirm \
-            git python python-httplib2 python-pyparsing python-six npm rsync
+            git python python-httplib2 python-pyparsing python-six python-requests \
+            python-urllib3 python-idna python-yaml python-lxml python-pygments \
+            python-pytest python-coverage python-packaging python-brotli \
+            npm rsync
 
         cd /work
         /repo/fetch-chromium-release "$CHROMIUM_VERSION"
