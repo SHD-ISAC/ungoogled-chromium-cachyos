@@ -62,6 +62,43 @@ docker run --rm \
             done
         }
 
+        clear_sync_databases() {
+            sudo rm -f \
+                /var/lib/pacman/sync/*.db \
+                /var/lib/pacman/sync/*.db.sig \
+                /var/lib/pacman/sync/*.files \
+                /var/lib/pacman/sync/*.files.sig \
+                /var/lib/pacman/sync/*.part
+        }
+
+        pacman_sync_retry() {
+            local attempt
+            for attempt in 1 2 3 4 5; do
+                echo "==> Repository sync attempt $attempt/5"
+
+                # Never reuse a database/signature pair from a previous failed
+                # mirror transaction. A mirror can briefly expose a new .db
+                # with an old .sig (or vice versa) while it is synchronizing.
+                clear_sync_databases
+
+                # Re-rank mirrors on every retry so a cryptographically
+                # inconsistent mirror is not selected five times in a row.
+                if command -v cachyos-rate-mirrors >/dev/null 2>&1; then
+                    sudo cachyos-rate-mirrors || true
+                fi
+
+                if sudo pacman -Syy --noconfirm; then
+                    return 0
+                fi
+
+                echo "warning: repository sync failed; switching mirrors before retry" >&2
+                sleep $((attempt * 10))
+            done
+
+            echo "error: repository sync failed after 5 clean mirror retries" >&2
+            return 1
+        }
+
         if grep -q "^#DisableSandbox" /etc/pacman.conf; then
             sudo sed -i "s/^#DisableSandbox/DisableSandbox/" /etc/pacman.conf
         elif ! grep -q "^DisableSandbox" /etc/pacman.conf; then
@@ -74,7 +111,7 @@ docker run --rm \
             sudo pacman-key --populate cachyos
         fi
 
-        retry 5 10 sudo pacman -Syy --noconfirm
+        pacman_sync_retry
         sudo pacman -S --needed --noconfirm archlinux-keyring cachyos-keyring || true
         sudo pacman-key --populate archlinux
         if [[ -f /usr/share/pacman/keyrings/cachyos.gpg ]]; then
