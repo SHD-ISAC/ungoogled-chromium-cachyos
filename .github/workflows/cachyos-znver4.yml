@@ -18,6 +18,7 @@ on:
       - '*.patch'
       - fetch-chromium-release
       - cachyos-build.sh
+      - .github/upload-existing-package.trigger
 
 permissions:
   contents: write
@@ -35,6 +36,45 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Determine package source
+        id: mode
+        shell: bash
+        env:
+          DISPATCH_PACKAGE_PATH: ${{ inputs.existing_package_path }}
+        run: |
+          set -euo pipefail
+
+          reuse=false
+          package_path=""
+          release_tag=""
+          source_commit=""
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && -n "$DISPATCH_PACKAGE_PATH" ]]; then
+            reuse=true
+            package_path="$DISPATCH_PACKAGE_PATH"
+          elif [[ -f .github/upload-existing-package.trigger ]]; then
+            reuse=true
+            while IFS='=' read -r key value; do
+              case "$key" in
+                package_path) package_path="$value" ;;
+                release_tag) release_tag="$value" ;;
+                source_commit) source_commit="$value" ;;
+              esac
+            done < .github/upload-existing-package.trigger
+          fi
+
+          if [[ "$reuse" == true ]]; then
+            [[ "$package_path" = /* ]] || {
+              echo "Existing package path must be absolute: $package_path" >&2
+              exit 1
+            }
+          fi
+
+          echo "reuse=$reuse" >> "$GITHUB_OUTPUT"
+          echo "package_path=$package_path" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
 
       - name: Verify Zen4 / x86-64-v4 runner
         shell: bash
@@ -55,12 +95,18 @@ jobs:
             }
           done
 
-          command -v docker
-          docker info >/dev/null
           command -v pacman
 
+          if [[ "${{ steps.mode.outputs.reuse }}" != "true" ]]; then
+            command -v docker
+            docker info >/dev/null
+            echo "Docker is available."
+          else
+            echo "Upload-only mode: Docker is not required."
+          fi
+
           echo "x86-64-v4 CPU feature check passed."
-          echo "Docker and pacman are available."
+          echo "pacman is available."
 
       - name: Clean stale package outputs
         shell: bash
@@ -68,10 +114,10 @@ jobs:
           rm -f ./ungoogled-chromium-*.pkg.tar.zst ./SHA256SUMS
 
       - name: Reuse existing package
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.existing_package_path != '' }}
+        if: ${{ steps.mode.outputs.reuse == 'true' }}
         shell: bash
         env:
-          EXISTING_PACKAGE_PATH: ${{ inputs.existing_package_path }}
+          EXISTING_PACKAGE_PATH: ${{ steps.mode.outputs.package_path }}
         run: |
           set -euo pipefail
 
@@ -84,7 +130,7 @@ jobs:
           echo "Reusing existing package: $(basename "$EXISTING_PACKAGE_PATH")"
 
       - name: Build with official CachyOS znver4 environment
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.existing_package_path == '' }}
+        if: ${{ steps.mode.outputs.reuse != 'true' }}
         shell: bash
         run: ./cachyos-build.sh
 
@@ -128,6 +174,28 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
+
+      - name: Publish GitHub Release from reused package
+        if: ${{ steps.mode.outputs.reuse == 'true' && steps.mode.outputs.release_tag != '' }}
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        with:
+          tag_name: ${{ steps.mode.outputs.release_tag }}
+          target_commitish: ${{ steps.mode.outputs.source_commit }}
+          name: ungoogled-chromium ${{ steps.meta.outputs.version }} — CachyOS znver4
+          body: |
+            Self-hosted Zen4 build of ungoogled-chromium for CachyOS.
+
+            - Package architecture: x86_64_v4
+            - Build tuning: -march=znver4
+            - Build environment: cachyos/docker-makepkg-znver4
+            - Ninja parallelism: -j8
+            - Source commit: ${{ steps.mode.outputs.source_commit }}
+
+            SHA-256 checksums are included in SHA256SUMS.
+          files: |
+            ./ungoogled-chromium-*.pkg.tar.zst
+            ./SHA256SUMS
+          fail_on_unmatched_files: true
 
       - name: Publish GitHub Release
         if: ${{ startsWith(github.ref, 'refs/tags/znver4-') }}
