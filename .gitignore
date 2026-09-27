@@ -1,7 +1,7 @@
-.github/actions/stage/node_modules
-.github/actions/stage/*.js
-
 pkg
 src
 *.tar.*
 ungoogled-chromium-archlinux
+build-output/
+__pycache__/
+*.log

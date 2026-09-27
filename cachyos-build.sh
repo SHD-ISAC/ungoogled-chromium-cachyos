@@ -5,154 +5,66 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$repo_root"
 
 image="${CACHYOS_MAKEPKG_IMAGE:-cachyos/docker-makepkg-znver4:latest}"
-builder_name="ungoogled-chromium-cachyos-${USER:-builder}-$$"
+jobs="${CHROMIUM_BUILD_JOBS:-8}"
+[[ $jobs =~ ^[1-9][0-9]*$ ]] || { echo >&2 'CHROMIUM_BUILD_JOBS must be a positive integer'; exit 1; }
+command -v docker >/dev/null
+command -v bsdtar >/dev/null
 
-if ! command -v docker >/dev/null 2>&1; then
-    echo "error: docker is required" >&2
+# CHROMIUM_CACHE_DIR has the same meaning in both entry points: the cache base.
+cache_base="${CHROMIUM_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/ungoogled-chromium-cachyos}"
+source_cache="$cache_base/chromium-source"
+output_dir="${CACHYOS_OUTPUT_DIR:-$repo_root/build-output/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+mkdir -p "$source_cache" "$output_dir"
+source_cache="$(realpath "$source_cache")"
+output_dir="$(realpath "$output_dir")"
+
+# Do not let a stale package make a failed build look successful or remove a
+# previous successful build. Each invocation needs its own output directory.
+if [[ -n $(find "$output_dir" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
+    echo >&2 "Output directory must be empty: $output_dir"
     exit 1
 fi
 
-if [[ ! -f PKGBUILD ]]; then
-    echo "error: PKGBUILD not found in $repo_root" >&2
-    exit 1
-fi
-
-cache_root="${CHROMIUM_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/ungoogled-chromium-cachyos/chromium-source}"
-mkdir -p "$cache_root"
+builder_name="ungoogled-chromium-build-$(id -u)-$$"
+cleanup() {
+    local rc=$?
+    trap - EXIT
+    docker rm -f "$builder_name" >/dev/null 2>&1 || true
+    exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "==> Build image: $image"
-echo "==> Source tree: $repo_root"
-echo "==> Chromium source cache: $cache_root"
-echo "==> Building ungoogled-chromium in the official CachyOS makepkg environment"
+echo "==> Chromium source cache: $source_cache"
+echo "==> Output: $output_dir"
+echo "==> Parallel jobs: $jobs"
+docker pull "$image"
+image_id="$(docker image inspect --format '{{.Id}}' "$image")"
+{
+    printf 'image=%s\nimage_id=%s\njobs=%s\n' "$image" "$image_id" "$jobs"
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        printf 'recipe_commit=%s\n' "$(git rev-parse HEAD)"
+        printf 'recipe_dirty=%s\n' "$(test -z "$(git status --porcelain)" && echo false || echo true)"
+    else
+        printf 'recipe_commit=unknown\nrecipe_dirty=unknown\n'
+    fi
+    docker image inspect --format 'repo_digests={{json .RepoDigests}}' "$image_id"
+} > "$output_dir/build-environment.txt"
 
-docker run --rm \
-    --pull=always \
-    --name "$builder_name" \
-    -e EXPORT_PKG=1 \
+# The recipe and source cache are read-only. Waiting on a background client
+# lets Bash handle cancellation immediately and remove its named container.
+docker run --rm --init --name "$builder_name" \
+    -e CHROMIUM_BUILD_JOBS="$jobs" \
     -e CHROMIUM_SOURCE_CACHE=/source-cache \
-    -v "$repo_root:/pkg" \
-    -v "$cache_root:/source-cache:ro" \
-    "$image" \
-    /bin/bash -lc '
-        set -euo pipefail
+    -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+    -v "$repo_root:/recipe:ro" \
+    -v "$source_cache:/source-cache:ro" \
+    -v "$output_dir:/output" \
+    "$image_id" /bin/bash /recipe/scripts/container-build.sh \
+    > >(tee "$output_dir/build.log") 2>&1 &
+wait "$!"
 
-        pacman_sync_retry() {
-            local attempt
-            for attempt in 1 2 3 4 5; do
-                echo "==> Repository sync attempt $attempt/5"
-                if sudo pacman -Syy --noconfirm; then
-                    return 0
-                fi
-                echo "warning: repository sync failed; discarding temporary sync databases before retry" >&2
-                sudo rm -f /var/lib/pacman/sync/*.db /var/lib/pacman/sync/*.db.sig \
-                           /var/lib/pacman/sync/*.files /var/lib/pacman/sync/*.files.sig
-                sleep $((attempt * 5))
-            done
-            echo "error: repository sync failed after 5 attempts" >&2
-            return 1
-        }
-
-        pacman_upgrade_retry() {
-            local attempt
-            for attempt in 1 2 3 4 5; do
-                echo "==> Full system upgrade attempt $attempt/5"
-                if sudo pacman -Syyu --noconfirm; then
-                    return 0
-                fi
-                echo "warning: full upgrade failed; refreshing repository databases before retry" >&2
-                sudo rm -f /var/lib/pacman/sync/*.db /var/lib/pacman/sync/*.db.sig \
-                           /var/lib/pacman/sync/*.files /var/lib/pacman/sync/*.files.sig
-                sleep $((attempt * 5))
-            done
-            echo "error: full system upgrade failed after 5 attempts" >&2
-            return 1
-        }
-
-        echo "==> Preparing pacman inside the build container"
-
-        # pacman 7 download sandboxing can fail under Docker when Landlock
-        # rules cannot be applied. Disable it only inside this ephemeral
-        # build container; the host pacman configuration is untouched.
-        if grep -q "^#DisableSandbox" /etc/pacman.conf; then
-            sudo sed -i "s/^#DisableSandbox/DisableSandbox/" /etc/pacman.conf
-        elif ! grep -q "^DisableSandbox" /etc/pacman.conf; then
-            echo "DisableSandbox" | sudo tee -a /etc/pacman.conf >/dev/null
-        fi
-
-        # Bootstrap trust from the keyrings already present in the image.
-        sudo pacman-key --init
-        sudo pacman-key --populate archlinux
-        if [[ -f /usr/share/pacman/keyrings/cachyos.gpg ]]; then
-            sudo pacman-key --populate cachyos
-        fi
-
-        echo "==> Updating repository databases and keyring packages first"
-        pacman_sync_retry
-
-        # Update signing metadata before the full upgrade. Package signature
-        # checking remains enabled; this does not use TrustAll for Arch repos.
-        keyring_packages=(archlinux-keyring)
-        if pacman -Si cachyos-keyring >/dev/null 2>&1; then
-            keyring_packages+=(cachyos-keyring)
-        fi
-        sudo pacman -S --needed --noconfirm "${keyring_packages[@]}"
-
-        sudo pacman-key --populate archlinux
-        if [[ -f /usr/share/pacman/keyrings/cachyos.gpg ]]; then
-            sudo pacman-key --populate cachyos
-        fi
-
-        # Refresh mirror ordering at build time. If one mirror is in the middle
-        # of syncing its database/signature pair, the retry logic below will
-        # discard the inconsistent copy and fetch it again.
-        if command -v cachyos-rate-mirrors >/dev/null 2>&1; then
-            sudo cachyos-rate-mirrors || true
-        fi
-
-        pacman_sync_retry
-        pacman_upgrade_retry
-
-        # Continue with the same build flow as the CachyOS image run.sh, but
-        # keep failures visible instead of swallowing makepkg errors.
-        rm -rf /tmp/pkg
-        cp -r /pkg /tmp/pkg
-        cd /tmp/pkg
-
-        mkdir -p /home/notroot/packages
-
-        if [[ -n "${CHECKSUMS:-}" ]]; then
-            echo "==> Updating checksums"
-            updpkgsums
-            makepkg --printsrcinfo > .SRCINFO
-        fi
-
-        if [[ -n "${USE_PARU:-}" ]]; then
-            paru -U --noconfirm --cleanafter
-        else
-            makepkg -sc --skipinteg --noconfirm --log
-        fi
-
-        if [[ -n "${EXPORT_PKG:-}" ]]; then
-            sudo chown "$(stat -c "%u:%g" /pkg/PKGBUILD)" /home/notroot/packages/* || true
-            sudo mv /home/notroot/packages/*.log /pkg/ || true
-            sudo mv /home/notroot/packages/*pkg.tar* /pkg/
-        fi
-    '
-
-shopt -s nullglob
-packages=(ungoogled-chromium-*.pkg.tar.zst)
-
-if (("${#packages[@]}" == 0)); then
-    echo "error: build completed but no ungoogled-chromium package was found" >&2
-    exit 1
-fi
-
-echo
-echo "==> Built package metadata"
-for pkg in "${packages[@]}"; do
-    echo "--- $pkg"
-    pacman -Qip "$pkg" | grep -E "^(Name|Version|Architecture|Packager)" || true
-done
-
-echo
-echo "==> Expected default target: Architecture=x86_64_v4, C/C++ tuned with -march=znver4"
+"$repo_root/scripts/verify-package.sh" "$output_dir"
+echo "==> Build complete: $output_dir"

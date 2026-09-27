@@ -1,5 +1,9 @@
 # ungoogled-chromium-archlinux
 
+**CachyOS fork:** this branch builds on a self-hosted Zen 4 machine. See
+[CACHYOS.md](CACHYOS.md) for its build, source-cache, verification and release
+instructions. The upstream README below is retained for reference.
+
 Arch Linux packaging for [ungoogled-chromium](//github.com/ungoogled-software/ungoogled-chromium).
 
 ## A note on reproducibility

@@ -3,148 +3,59 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$repo_root"
-
-version="${1:-$(sed -n 's/^pkgver=//p' PKGBUILD | head -n1)}"
-if [[ -z "$version" ]]; then
-    echo "error: could not determine Chromium version from PKGBUILD" >&2
+version="${1:-$(sed -n 's/^pkgver=//p' PKGBUILD)}"
+[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    echo >&2 'Expected a Chromium version such as 153.0.8010.47'
     exit 1
-fi
+}
 
 image="${CACHYOS_MAKEPKG_IMAGE:-cachyos/docker-makepkg-znver4:latest}"
 cache_base="${CHROMIUM_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/ungoogled-chromium-cachyos}"
 source_cache="$cache_base/chromium-source"
 git_cache="$cache_base/git-cache"
+mkdir -p "$source_cache" "$git_cache"
+source_cache="$(realpath "$source_cache")"
+git_cache="$(realpath "$git_cache")"
 target="$source_cache/chromium-$version"
 stage="$source_cache/.prefetch-$version"
 
-mkdir -p "$source_cache" "$git_cache"
-
-if [[ -f "$target/.ungoogled-chromium-cache-complete" ]]; then
-    echo "==> Chromium $version is already prefetched:"
-    echo "    $target"
+# Serialize all prefetches sharing the dependency cache, including different
+# versions. Interrupted staging trees stay available to the next invocation.
+exec 9>"$git_cache/.prefetch.lock"
+flock -n 9 || { echo >&2 "Another prefetch is using $git_cache"; exit 1; }
+if [[ -f $target/.ungoogled-chromium-cache-complete ]]; then
+    echo "==> Chromium $version is already prefetched: $target"
     exit 0
 fi
-
+if [[ -e $target || -L $target ]]; then
+    echo >&2 "Incomplete cache exists: $target; move it aside before retrying"
+    exit 1
+fi
 mkdir -p "$stage"
 
-echo "==> Prefetching Chromium $version"
-echo "==> Image: $image"
-echo "==> Source cache: $source_cache"
-echo "==> Git dependency cache: $git_cache"
-echo "==> This step may be run with WARP enabled; do not run the GitHub runner at the same time."
+builder_name="ungoogled-chromium-prefetch-$(id -u)-$$"
+cleanup() {
+    local rc=$?
+    trap - EXIT
+    docker rm -f "$builder_name" >/dev/null 2>&1 || true
+    exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-docker run --rm \
-    --pull=always \
-    -e CHROMIUM_VERSION="$version" \
-    -e GIT_CACHE_PATH=/git-cache \
-    -e VPYTHON_BYPASS="manually managed python not supported by chrome operations" \
-    -v "$repo_root:/repo:ro" \
-    -v "$stage:/work" \
-    -v "$git_cache:/git-cache" \
-    "$image" \
-    /bin/bash -lc '
-        set -euo pipefail
+echo "==> Prefetching Chromium $version into $target"
+echo '==> You may use WARP for prefetch, then disable it before starting the GitHub runner.'
+if [[ ! -f $stage/chromium-$version/.ungoogled-chromium-cache-complete ]]; then
+    command -v docker >/dev/null
+    docker run --rm --init --pull=always --name "$builder_name" \
+        -e CHROMIUM_VERSION="$version" -e GIT_CACHE_PATH=/git-cache \
+        -v "$repo_root:/recipe:ro" -v "$stage:/work" -v "$git_cache:/git-cache" \
+        "$image" /bin/bash /recipe/scripts/container-prefetch.sh &
+    wait "$!"
+fi
 
-        retry() {
-            local attempts=$1
-            local delay=$2
-            shift 2
-            local n=1
-            until "$@"; do
-                local rc=$?
-                if (( n >= attempts )); then
-                    echo "error: command failed after $n attempts (exit $rc): $*" >&2
-                    return "$rc"
-                fi
-                echo "warning: attempt $n/$attempts failed; retrying in ${delay}s: $*" >&2
-                sleep "$delay"
-                ((n++))
-            done
-        }
-
-        clear_sync_databases() {
-            sudo rm -f \
-                /var/lib/pacman/sync/*.db \
-                /var/lib/pacman/sync/*.db.sig \
-                /var/lib/pacman/sync/*.files \
-                /var/lib/pacman/sync/*.files.sig \
-                /var/lib/pacman/sync/*.part
-        }
-
-        pacman_sync_retry() {
-            local attempt
-            for attempt in 1 2 3 4 5; do
-                echo "==> Repository sync attempt $attempt/5"
-
-                # Never reuse a database/signature pair from a previous failed
-                # mirror transaction. A mirror can briefly expose a new .db
-                # with an old .sig (or vice versa) while it is synchronizing.
-                clear_sync_databases
-
-                # Re-rank mirrors on every retry so a cryptographically
-                # inconsistent mirror is not selected five times in a row.
-                if command -v cachyos-rate-mirrors >/dev/null 2>&1; then
-                    sudo cachyos-rate-mirrors || true
-                fi
-
-                if sudo pacman -Syy --noconfirm; then
-                    return 0
-                fi
-
-                echo "warning: repository sync failed; switching mirrors before retry" >&2
-                sleep $((attempt * 10))
-            done
-
-            echo "error: repository sync failed after 5 clean mirror retries" >&2
-            return 1
-        }
-
-        if grep -q "^#DisableSandbox" /etc/pacman.conf; then
-            sudo sed -i "s/^#DisableSandbox/DisableSandbox/" /etc/pacman.conf
-        elif ! grep -q "^DisableSandbox" /etc/pacman.conf; then
-            echo "DisableSandbox" | sudo tee -a /etc/pacman.conf >/dev/null
-        fi
-
-        sudo pacman-key --init
-        sudo pacman-key --populate archlinux
-        if [[ -f /usr/share/pacman/keyrings/cachyos.gpg ]]; then
-            sudo pacman-key --populate cachyos
-        fi
-
-        pacman_sync_retry
-        sudo pacman -S --needed --noconfirm archlinux-keyring cachyos-keyring || true
-        sudo pacman-key --populate archlinux
-        if [[ -f /usr/share/pacman/keyrings/cachyos.gpg ]]; then
-            sudo pacman-key --populate cachyos
-        fi
-
-        retry 5 15 sudo pacman -Syu --needed --noconfirm \
-            git python python313 python-httplib2 python-pyparsing python-six python-requests \
-            python-urllib3 python-idna python-yaml python-lxml python-pygments \
-            python-pytest python-coverage python-packaging python-brotli \
-            python-hjson python-parameterized python-colorama python-sqlparse \
-            python-pluggy python-iniconfig npm rsync
-
-        # VPYTHON_BYPASS makes depot_tools use the system Python. CachyOS
-        # currently ships Python 3.14 as /usr/bin/python3, while depot_tools
-        # gsutil supports only Python 3.9-3.13. Put a private Python 3.13 shim
-        # first in PATH for this prefetch process only; the host and normal
-        # CachyOS build environment remain unchanged.
-        mkdir -p /tmp/chromium-python
-        ln -sf /usr/bin/python3.13 /tmp/chromium-python/python3
-        export PATH="/tmp/chromium-python:$PATH"
-        echo "==> depot_tools Python: $(python3 --version)"
-
-        cd /work
-        /repo/fetch-chromium-release "$CHROMIUM_VERSION"
-        touch "chromium-$CHROMIUM_VERSION/.ungoogled-chromium-cache-complete"
-    '
-
-rm -rf "$target"
-mv "$stage/chromium-$version" "$target"
+[[ -f $stage/chromium-$version/.ungoogled-chromium-cache-complete ]]
+mv -T -- "$stage/chromium-$version" "$target"
 rmdir "$stage" 2>/dev/null || true
-
-echo
-echo "==> Prefetch complete"
-echo "    $target"
-echo "==> You can now disable WARP and run the GitHub self-hosted runner."
+echo "==> Prefetch complete: $target"

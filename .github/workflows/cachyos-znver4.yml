@@ -4,192 +4,219 @@ on:
   workflow_dispatch:
     inputs:
       existing_package_path:
-        description: 'Absolute path to an existing .pkg.tar.zst on this self-hosted runner; leave empty to build normally'
+        description: 'Existing package outside the runner checkout; leave empty to build'
         required: false
         type: string
         default: ''
+      build_jobs:
+        description: 'Maximum parallel build/compression jobs (default 8)'
+        required: false
+        type: string
+        default: '8'
   push:
-    branches:
-      - cachyos-znver4
-    tags:
-      - 'znver4-*'
+    branches: [cachyos-znver4]
+    tags: ['znver4-*']
     paths:
       - PKGBUILD
       - '*.patch'
       - fetch-chromium-release
       - cachyos-build.sh
+      - prefetch-chromium.sh
+      - 'scripts/**'
+      - 'tests/**'
+      - .github/workflows/cachyos-znver4.yml
 
 permissions:
-  contents: write
+  contents: read
 
+# Branch and tag builds share the same machine. Do not cancel a many-hour build
+# on every push or run a branch build and tag build concurrently.
 concurrency:
-  group: ungoogled-chromium-cachyos-znver4-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  group: ungoogled-chromium-cachyos-znver4
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   build:
-    name: Build znver4 package
+    name: Build or reuse znver4 package
     runs-on: [self-hosted, Linux, X64, zen4]
     timeout-minutes: 1440
+    env:
+      LC_ALL: C
+      CHROMIUM_BUILD_JOBS: ${{ inputs.build_jobs || vars.CHROMIUM_BUILD_JOBS || '8' }}
+      CHROMIUM_CACHE_DIR: ${{ vars.CHROMIUM_CACHE_DIR }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-
-      - name: Determine package source
+      - name: Select package source before checkout cleanup
         id: mode
-        shell: bash
         env:
           DISPATCH_PACKAGE_PATH: ${{ inputs.existing_package_path }}
+          UPLOAD_PACKAGE_PATH: ${{ vars.CACHYOS_EXISTING_PACKAGE_PATH }}
         run: |
           set -euo pipefail
-
-          reuse=false
-          package_path=""
-
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && -n "$DISPATCH_PACKAGE_PATH" ]]; then
-            reuse=true
-            package_path="$DISPATCH_PACKAGE_PATH"
-          fi
-
-          if [[ "$reuse" == true ]]; then
-            [[ "$package_path" = /* ]] || {
-              echo "Existing package path must be absolute: $package_path" >&2
+          CACHYOS_OUTPUT_DIR="$RUNNER_TEMP/ungoogled-chromium-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf 'CACHYOS_OUTPUT_DIR=%s\n' "$CACHYOS_OUTPUT_DIR" >> "$GITHUB_ENV"
+          [[ $CHROMIUM_BUILD_JOBS =~ ^[1-9][0-9]*$ ]] || {
+            echo '::error::Build jobs must be a positive integer'
+            exit 1
+          }
+          package_path=''
+          if [[ $GITHUB_REF == refs/tags/znver4-upload-* ]]; then
+            package_path=$UPLOAD_PACKAGE_PATH
+            [[ -n $package_path ]] || {
+              echo '::error::Upload tags require the CACHYOS_EXISTING_PACKAGE_PATH repository variable'
               exit 1
             }
+          elif [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then
+            package_path=$DISPATCH_PACKAGE_PATH
           fi
-
-          echo "reuse=$reuse" >> "$GITHUB_OUTPUT"
-          echo "package_path=$package_path" >> "$GITHUB_OUTPUT"
-
-      - name: Verify Zen4 / x86-64-v4 runner
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Runner:"
-          uname -a
-          lscpu | grep -E 'Architecture|Model name|CPU\(s\)' || true
-
-          flags=" $(grep -m1 '^flags' /proc/cpuinfo | cut -d: -f2) "
-          required=(avx avx2 bmi1 bmi2 fma movbe avx512f avx512bw avx512cd avx512dq avx512vl)
-
-          for flag in "${required[@]}"; do
-            [[ "$flags" == *" $flag "* ]] || {
-              echo "Missing required x86-64-v4 CPU flag: $flag" >&2
+          mkdir -p "$CACHYOS_OUTPUT_DIR"
+          if [[ -n $package_path ]]; then
+            [[ $package_path == /* && $package_path != *$'\n'* && $package_path != *$'\r'* ]]
+            package_path=$(realpath -e -- "$package_path")
+            [[ -f $package_path && $package_path == *.pkg.tar.zst ]]
+            [[ $package_path != "$GITHUB_WORKSPACE"/* ]] || {
+              echo '::error::Move the existing package outside the checkout before running this workflow'
               exit 1
             }
-          done
-
-          command -v pacman
-
-          if [[ "${{ steps.mode.outputs.reuse }}" != "true" ]]; then
-            command -v docker
-            docker info >/dev/null
-            echo "Docker is available."
+            cp --reflink=auto -- "$package_path" "$CACHYOS_OUTPUT_DIR/"
+            echo 'reuse=true' >> "$GITHUB_OUTPUT"
+            echo 'origin=reused external package; original source revision is not inferred' >> "$GITHUB_OUTPUT"
           else
-            echo "Upload-only mode: Docker is not required."
+            echo 'reuse=false' >> "$GITHUB_OUTPUT"
+            echo 'origin=built from the checked-out recipe' >> "$GITHUB_OUTPUT"
           fi
 
-          echo "x86-64-v4 CPU feature check passed."
-          echo "pacman is available."
-
-      - name: Clean stale package outputs
-        shell: bash
-        run: |
-          rm -f ./ungoogled-chromium-*.pkg.tar.zst ./SHA256SUMS
-
-      - name: Reuse existing package
-        if: ${{ steps.mode.outputs.reuse == 'true' }}
-        shell: bash
-        env:
-          EXISTING_PACKAGE_PATH: ${{ steps.mode.outputs.package_path }}
-        run: |
-          set -euo pipefail
-
-          [[ -f "$EXISTING_PACKAGE_PATH" ]] || {
-            echo "Existing package not found: $EXISTING_PACKAGE_PATH" >&2
-            exit 1
-          }
-
-          cp --reflink=auto "$EXISTING_PACKAGE_PATH" ./
-          echo "Reusing existing package: $(basename "$EXISTING_PACKAGE_PATH")"
-
-      - name: Build with official CachyOS znver4 environment
-        if: ${{ steps.mode.outputs.reuse != 'true' }}
-        shell: bash
-        run: ./cachyos-build.sh
-
-      - name: Verify package and generate checksums
-        id: meta
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-
-          packages=(./ungoogled-chromium-*.pkg.tar.zst)
-          ((${#packages[@]} > 0)) || {
-            echo "No package was produced." >&2
-            exit 1
-          }
-
-          for pkg in "${packages[@]}"; do
-            echo "==> $pkg"
-            pacman -Qip "$pkg" | grep -E '^(Name|Version|Architecture|Packager)'
-
-            arch="$(pacman -Qip "$pkg" | sed -n 's/^Architecture[[:space:]]*:[[:space:]]*//p' | head -n1)"
-            [[ "$arch" == "x86_64_v4" ]] || {
-              echo "Unexpected package architecture: $arch" >&2
-              exit 1
-            }
-          done
-
-          sha256sum "${packages[@]}" | tee SHA256SUMS
-
-          source ./PKGBUILD
-          echo "version=${pkgver}-${pkgrel}" >> "$GITHUB_OUTPUT"
-          echo "Package architecture verified as x86_64_v4."
-
-      - name: Upload package artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: ungoogled-chromium-${{ steps.meta.outputs.version }}-znver4
-          path: |
-            ./ungoogled-chromium-*.pkg.tar.zst
-            ./SHA256SUMS
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 30
+          persist-credentials: false
 
-      - name: Verify release token
+      - name: Validate helpers
+        run: |
+          set -euo pipefail
+          command -v bsdtar
+          for script in PKGBUILD fetch-chromium-release ./*.sh scripts/*.sh; do
+            bash -n "$script"
+          done
+          python3 -m unittest discover -s tests -v
+
+      - name: Check release inputs before building
         if: ${{ startsWith(github.ref, 'refs/tags/znver4-') }}
-        shell: bash
         env:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           set -euo pipefail
-
-          [[ -n "$RELEASE_TOKEN" ]] || {
-            echo "::error::Repository secret RELEASE_TOKEN is required for releases from cachyos-znver4 because the target commit modifies .github/workflows relative to the default branch."
+          source ./PKGBUILD
+          version="${pkgver}-${pkgrel}"
+          [[ $GITHUB_REF_NAME == "znver4-$version" || $GITHUB_REF_NAME == "znver4-upload-$version" ]] || {
+            echo "::error::Tag must match the PKGBUILD version: znver4-$version or znver4-upload-$version"
+            exit 1
+          }
+          [[ -n $RELEASE_TOKEN ]] || {
+            echo '::error::Set the repository secret RELEASE_TOKEN before publishing a release'
             exit 1
           }
 
+      - name: Verify x86-64-v4 build runner
+        if: ${{ steps.mode.outputs.reuse != 'true' }}
+        run: |
+          set -euo pipefail
+          uname -a
+          lscpu
+          flags=" $(awk -F: '/^flags/ {print $2; exit}' /proc/cpuinfo) "
+          required=(cx16 lahf_lm popcnt pni ssse3 sse4_1 sse4_2 avx avx2 bmi1 bmi2 f16c fma abm movbe xsave avx512f avx512bw avx512cd avx512dq avx512vl)
+          for flag in "${required[@]}"; do
+            [[ $flags == *" $flag "* ]] || {
+              echo "::error::Missing x86-64-v4 CPU flag: $flag"
+              exit 1
+            }
+          done
+          docker info >/dev/null
+          free -h
+          df -h "$RUNNER_TEMP"
+
+      - name: Build with official CachyOS znver4 environment
+        if: ${{ steps.mode.outputs.reuse != 'true' }}
+        run: ./cachyos-build.sh
+
+      - name: Verify package identity, version, architecture and checksums
+        id: meta
+        run: ./scripts/verify-package.sh "$CACHYOS_OUTPUT_DIR"
+
+      - name: Record artifact provenance
+        env:
+          PACKAGE_ORIGIN: ${{ steps.mode.outputs.origin }}
+        run: |
+          printf 'workflow_commit=%s\npackage_origin=%s\nrun_url=%s/%s/actions/runs/%s\n' \
+            "$GITHUB_SHA" "$PACKAGE_ORIGIN" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" \
+            > "$CACHYOS_OUTPUT_DIR/workflow-provenance.txt"
+
+      - name: Upload package artifact
+        id: artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ungoogled-chromium-${{ steps.meta.outputs.version }}-znver4-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CACHYOS_OUTPUT_DIR }}/*.pkg.tar.zst
+            ${{ env.CACHYOS_OUTPUT_DIR }}/SHA256SUMS
+            ${{ env.CACHYOS_OUTPUT_DIR }}/package.*
+            ${{ env.CACHYOS_OUTPUT_DIR }}/build-environment.txt
+            ${{ env.CACHYOS_OUTPUT_DIR }}/build-packages.txt
+            ${{ env.CACHYOS_OUTPUT_DIR }}/workflow-provenance.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Upload build diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.CACHYOS_OUTPUT_DIR }}/build.log
+            ${{ env.CACHYOS_OUTPUT_DIR }}/logs/
+            ${{ env.CACHYOS_OUTPUT_DIR }}/build-environment.txt
+            ${{ env.CACHYOS_OUTPUT_DIR }}/build-packages.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Publish GitHub Release
         if: ${{ startsWith(github.ref, 'refs/tags/znver4-') }}
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           token: ${{ secrets.RELEASE_TOKEN }}
+          target_commitish: ${{ github.sha }}
           name: ungoogled-chromium ${{ steps.meta.outputs.version }} — CachyOS znver4
           body: |
-            Self-hosted Zen4 build of ungoogled-chromium for CachyOS.
+            ungoogled-chromium package for CachyOS / Zen 4.
 
-            - Package architecture: x86_64_v4
-            - Build tuning: -march=znver4
-            - Build environment: cachyos/docker-makepkg-znver4
-            - Source commit: ${{ github.sha }}
+            - Verified package architecture: x86_64_v4
+            - Package origin: ${{ steps.mode.outputs.origin }}
+            - Workflow revision: ${{ github.sha }}
 
-            SHA-256 checksums are included in SHA256SUMS.
+            SHA256SUMS and the package's PKGINFO/BUILDINFO are included.
+            A reused package is version-checked; its original source commit is not independently verified.
           files: |
-            ./ungoogled-chromium-*.pkg.tar.zst
-            ./SHA256SUMS
+            ${{ env.CACHYOS_OUTPUT_DIR }}/*.pkg.tar.zst
+            ${{ env.CACHYOS_OUTPUT_DIR }}/SHA256SUMS
+            ${{ env.CACHYOS_OUTPUT_DIR }}/package.PKGINFO
+            ${{ env.CACHYOS_OUTPUT_DIR }}/package.BUILDINFO
+            ${{ env.CACHYOS_OUTPUT_DIR }}/workflow-provenance.txt
           fail_on_unmatched_files: true
+
+      - name: Summarize
+        if: ${{ always() }}
+        env:
+          RESULT: ${{ job.status }}
+          PACKAGE_ORIGIN: ${{ steps.mode.outputs.origin }}
+          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+        run: |
+          {
+            printf '### CachyOS znver4\n\n- Result: %s\n- Origin: %s\n' "$RESULT" "$PACKAGE_ORIGIN"
+            printf -- '- Output directory: %s\n' "$CACHYOS_OUTPUT_DIR"
+            if [[ -n $ARTIFACT_URL ]]; then printf '\n[Download package artifact](%s)\n' "$ARTIFACT_URL"; fi
+          } >> "$GITHUB_STEP_SUMMARY"

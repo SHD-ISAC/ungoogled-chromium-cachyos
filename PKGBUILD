@@ -136,7 +136,7 @@ sha256sums=('645f64566cfbb780747430d53ff3656f03639f89fed9544c1eadd4c17e7b1c82'
 
 if (( _manual_clone )); then
   source[0]=fetch-chromium-release
-  sha256sums[0]='2e2f36e3cd1ebc4ad57fd310774a5e5e9db77883d5f9374fedeaabd3c103b819'
+  sha256sums[0]='349c4e097a3f974a391fd80dd72e9d7ba38a70795ffa3a5a814d6d054ed88dc3'
   makedepends+=('python-httplib2' 'python-pyparsing' 'python-six' 'npm' 'rsync')
 fi
 
@@ -319,6 +319,11 @@ prepare() {
 }
 
 build() {
+  local _build_jobs=${CHROMIUM_BUILD_JOBS:-8}
+  [[ $_build_jobs =~ ^[1-9][0-9]*$ ]] || {
+    error 'CHROMIUM_BUILD_JOBS must be a positive integer'
+    return 1
+  }
   make -C chromium-launcher-$_launcher_ver
 
   cd chromium-$pkgver
@@ -422,7 +427,7 @@ build() {
   msg2 'Configuring Chromium'
   gn gen out/Release --args="${_flags[*]}"
   msg2 'Building Chromium'
-  ninja -j8 -C out/Release chrome chrome_sandbox chromedriver
+  ninja -j"$_build_jobs" -C out/Release chrome chrome_sandbox chromedriver
 }
 
 package() {

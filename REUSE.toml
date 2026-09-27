@@ -39,6 +39,11 @@ path = [
     ".gitignore",
     "aur/**",
     ".github/**",
+    "CACHYOS.md",
+    "cachyos-build.sh",
+    "prefetch-chromium.sh",
+    "scripts/**",
+    "tests/**",
 ]
 SPDX-FileCopyrightText = "2019-2026 The ungoogled-chromium Authors"
 SPDX-License-Identifier = "BSD-3-Clause"

@@ -3,8 +3,14 @@
 set -euo pipefail
 
 readonly VERSION=${1:-}
-if [[ -z $VERSION ]]; then
-  echo >&2 'No version given as an argument'
+if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo >&2 'Expected a Chromium version such as 153.0.8010.47'
+  exit 1
+fi
+
+readonly destination="chromium-$VERSION"
+if [[ -e $destination || -L $destination ]]; then
+  echo >&2 "Destination already exists: $destination (use a clean makepkg source directory)"
   exit 1
 fi
 
@@ -14,9 +20,23 @@ fi
 if [[ -n ${CHROMIUM_SOURCE_CACHE:-} ]]; then
   readonly cached_source="${CHROMIUM_SOURCE_CACHE}/chromium-${VERSION}"
   if [[ -f "${cached_source}/.ungoogled-chromium-cache-complete" ]]; then
+    # The marker also exists in older caches. Check the source version before
+    # trusting it, and publish the copy only after cp has completed successfully.
+    cached_version=$(awk -F= '
+      /^(MAJOR|MINOR|BUILD|PATCH)=/ { v[$1]=$2 }
+      END { printf "%s.%s.%s.%s", v["MAJOR"], v["MINOR"], v["BUILD"], v["PATCH"] }
+    ' "$cached_source/chrome/VERSION")
+    [[ $cached_version == "$VERSION" && -f $cached_source/DEPS ]] || {
+      echo >&2 "Incomplete or mismatched Chromium cache: $cached_source"
+      exit 1
+    }
     echo "Using prefetched Chromium source cache: $cached_source"
-    cp -a --reflink=auto "$cached_source" "chromium-$VERSION"
-    rm -f "chromium-$VERSION/.ungoogled-chromium-cache-complete"
+    copy_stage=$(mktemp -d ".chromium-$VERSION.copy.XXXXXX")
+    trap 'rm -rf -- "$copy_stage"' EXIT
+    cp -a --reflink=auto "$cached_source/." "$copy_stage/"
+    rm -f "$copy_stage/.ungoogled-chromium-cache-complete"
+    mv -T -- "$copy_stage" "$destination"
+    trap - EXIT
     exit 0
   fi
 fi
@@ -47,11 +67,13 @@ clone_retry() {
   local attempts=5
   while true; do
     rm -rf "$dest"
+    local rc
     if git clone "$@" "$dest"; then
       return 0
+    else
+      rc=$?
     fi
 
-    local rc=$?
     if (( n >= attempts )); then
       echo >&2 "git clone failed after $n attempts: $dest"
       return "$rc"
@@ -67,11 +89,13 @@ clone_retry() {
 # proxies that occasionally reset long-lived HTTP/2/TLS streams. Pass these
 # settings through Git's environment config so makepkg does not need a writable
 # global Git config or HOME; gclient child Git processes inherit them too.
-export GIT_CONFIG_COUNT=2
-export GIT_CONFIG_KEY_0=http.version
-export GIT_CONFIG_VALUE_0=HTTP/1.1
-export GIT_CONFIG_KEY_1=http.maxRequests
-export GIT_CONFIG_VALUE_1=4
+config_count=${GIT_CONFIG_COUNT:-0}
+[[ $config_count =~ ^[0-9]+$ ]] || { echo >&2 'Invalid GIT_CONFIG_COUNT'; exit 1; }
+export "GIT_CONFIG_KEY_${config_count}=http.version"
+export "GIT_CONFIG_VALUE_${config_count}=HTTP/1.1"
+export "GIT_CONFIG_KEY_$((config_count + 1))=http.maxRequests"
+export "GIT_CONFIG_VALUE_$((config_count + 1))=4"
+export GIT_CONFIG_COUNT=$((config_count + 2))
 
 mkdir -p chromium-checkout
 cd chromium-checkout
@@ -101,10 +125,17 @@ else
   clone_retry src -b "$VERSION" --depth=2 https://chromium.googlesource.com/chromium/src
 fi
 
+# An interrupted checkout may belong to a different version. Always select the
+# requested release before resolving DEPS, including when reusing a checkout.
+if ! git -C src rev-parse --verify "refs/tags/$VERSION^{commit}" >/dev/null 2>&1; then
+  retry 5 15 git -C src fetch --depth=2 origin "refs/tags/$VERSION:refs/tags/$VERSION"
+fi
+git -C src checkout --detach "refs/tags/$VERSION"
+
 # gclient sync performs many additional Git/network fetches. Retrying it in
 # place allows already completed dependencies to be reused instead of throwing
 # away the entire checkout after a transient transport failure.
-retry 5 20 gclient sync --no-history --nohooks
+retry 5 20 gclient sync --no-history --nohooks --revision "src@$VERSION"
 
 src/build/util/lastchange.py -o src/build/util/LASTCHANGE
 src/build/util/lastchange.py -m GPU_LISTS_VERSION \
@@ -121,4 +152,4 @@ retry 5 20 src/third_party/node/update_npm_deps
 
 rm -rf src/third_party/node/linux/node-linux-x64/bin/
 find src/third_party/jdk/current -type f -delete
-mv src ../chromium-$VERSION
+mv -T -- src "../$destination"
