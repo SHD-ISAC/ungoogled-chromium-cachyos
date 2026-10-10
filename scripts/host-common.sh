@@ -85,9 +85,9 @@ container_network() {
             echo >&2 'CACHYOS_PROXY_URL must use an HTTP proxy URL; use the HTTP/mixed listener, not a SOCKS-only port'
             return 1
         }
-        http_proxy=$CACHYOS_PROXY_URL
-        https_proxy=$CACHYOS_PROXY_URL
-        all_proxy=$CACHYOS_PROXY_URL
+        export http_proxy=$CACHYOS_PROXY_URL
+        export https_proxy=$CACHYOS_PROXY_URL
+        export all_proxy=$CACHYOS_PROXY_URL
     fi
     local loopback=false
     for lower in http_proxy https_proxy all_proxy no_proxy; do

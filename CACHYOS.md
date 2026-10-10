@@ -7,7 +7,7 @@ end-to-end validated.
 
 ## One-command build
 
-Requirements: Linux with x86-64-v4 CPU support, Docker access, Bash, Git,
+Requirements: Linux with a compatible Zen 4 CPU, Docker access, Bash, Git,
 coreutils, `flock`, Python 3 and `bsdtar` (`libarchive` on CachyOS). Run as an
 ordinary user. Keep enough RAM/disk for a full Chromium build.
 
@@ -131,7 +131,7 @@ Compilation is explicit:
 | Trigger | Behavior |
 | --- | --- |
 | Ordinary push to `cachyos-znver4` or PR targeting it | Hosted validation only |
-| Push whose head commit contains `[build]` | Validate, build and upload artifact |
+| Push whose head commit starts with `[build]` | Validate, build and upload artifact |
 | Tag `znver4-VERSION-RELEASE` | Build, upload artifact, publish Release in the cloud |
 | Tag `znver4-upload-VERSION-RELEASE` | Reuse `CACHYOS_EXISTING_PACKAGE_PATH`, upload and publish |
 | Dispatch with empty `existing_package_path` | Build and upload artifact |
@@ -165,7 +165,7 @@ Checkout credentials are not persisted.
 
 ## Move compilation to another machine
 
-Register an Actions runner on a **Linux x86-64-v4-capable machine with Docker**
+Register an Actions runner on another **compatible Linux Zen 4 machine with Docker**
 and enough RAM/disk. Give it a distinct label and set this repository variable
 as JSON, for example:
 
@@ -173,10 +173,11 @@ as JSON, for example:
 CACHYOS_BUILD_RUNNER=["self-hosted","Linux","X64","chromium-builder"]
 ```
 
-The default remains `["self-hosted","Linux","X64","zen4"]`. CPU features are
-checked before the build. A generic older x86 CPU can fail to run the znver4
-image's tools or generated host programs. Install the same host requirements
-and configure that machine's proxy if necessary.
+The default remains `["self-hosted","Linux","X64","zen4"]`. The preflight
+checks baseline x86-64-v4 features; that check alone does not prove compatibility
+with every znver4-tuned tool or generated host program. Another Zen 4 system is
+the conservative choice. Install the same host requirements and configure that
+machine's proxy if necessary.
 
 This selects the builder; it does not provision or pay for a server. A LAN
 machine removes compilation from the laptop. A suitable overseas machine can

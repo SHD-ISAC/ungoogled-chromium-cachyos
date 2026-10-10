@@ -78,12 +78,12 @@ jobs:
     name: Build or reuse znver4 package
     needs: validate
     # Routine changes validate in the cloud. Compilation requires an explicit
-    # dispatch, release tag, or [build] in the push message. PRs never use a builder.
+    # dispatch, release tag, or leading [build] commit marker. PRs never use a builder.
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
           (github.event_name == 'push' &&
            (startsWith(github.ref, 'refs/tags/znver4-') ||
-            contains(github.event.head_commit.message, '[build]'))) }}
+            startsWith(github.event.head_commit.message, '[build]'))) }}
     runs-on: ${{ fromJSON(vars.CACHYOS_BUILD_RUNNER || '["self-hosted", "Linux", "X64", "zen4"]') }}
     timeout-minutes: 1440
     concurrency:
