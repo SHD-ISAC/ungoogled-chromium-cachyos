@@ -137,9 +137,37 @@ exit 37''')
 esac''')
         self.mock("systemctl", "exit 3")
         self.mock("sudo", 'echo "$*" >> "$TEST_LOG"; touch "$TEST_LOG.started"')
+        for mode, expected in (("false", "systemctl start docker"),
+                               ("true", "-n systemctl start docker")):
+            with self.subTest(ci=mode):
+                self.env["CI"] = mode
+                self.log.unlink(missing_ok=True)
+                Path(str(self.log) + ".started").unlink(missing_ok=True)
+                result = self.host("ensure_docker")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.log.read_text().strip(), expected)
+
+    def test_unreachable_remote_docker_does_not_start_a_local_service(self):
+        self.env.update(CACHYOS_START_DOCKER="auto", DOCKER_HOST="ssh://fixture.invalid")
+        self.mock("docker", "exit 23")
+        self.mock("sudo", 'echo unexpected >> "$TEST_LOG"; exit 99')
         result = self.host("ensure_docker")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.log.exists())
+
+    def test_runner_runs_once_and_uses_a_separate_proxy_setting(self):
+        self.docker()
+        runner = self.work / "runner"
+        runner.mkdir()
+        script = runner / "run.sh"
+        script.write_text('#!/usr/bin/env bash\nprintf "%s|%s" "$*" "${http_proxy:-}"\n')
+        script.chmod(0o755)
+        self.env.update(CACHYOS_RUNNER_DIR=str(runner),
+                        CACHYOS_PROXY_URL="http://192.0.2.1:7890",
+                        CACHYOS_RUNNER_PROXY_URL="http://192.0.2.2:7890")
+        result = self.run_script("scripts/run-runner.sh")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.log.read_text().strip(), "systemctl start docker")
+        self.assertEqual(result.stdout, "--once|http://192.0.2.2:7890")
 
     def test_cancellation_during_automatic_prefetch_removes_its_container(self):
         self.env.update(CACHYOS_OUTPUT_DIR=str(self.work / "output"),
