@@ -1,49 +1,214 @@
 # CachyOS znver4 build
 
-`master` tracks upstream. `cachyos-znver4` adds the CachyOS build and release
-layer, while preserving the upstream Chromium patches and compiler settings.
-The initial `153.0.8010.47-1` package was built and installed successfully on
-the maintainer's Zen 4 machine. Changes to the build helpers still need a full
-build on that machine before they can be considered end-to-end validated.
+`master` tracks upstream. `cachyos-znver4` adds the build/release layer.
+The known installed package is `153.0.8010.47-1`; read PKGBUILD for the current
+recipe version. Changes to helpers need a full build before they can be called
+end-to-end validated.
 
-## Build settings
+## One-command build
 
-- Official image: `cachyos/docker-makepkg-znver4:latest`
-- Package architecture: `x86_64_v4`; C/C++ tuning: `-march=znver4 -O3`
-- Default parallelism: **8**, including Ninja, Make and package compression
-- Upstream system Clang, `chrome_pgo_phase=0`, Chromium ThinLTO, codecs,
-  VA-API, Wayland/PipeWire and ungoogled-chromium patches are preserved
-
-The package is intended for Zen 4 systems such as Ryzen 7000/7040. It cannot
-run on a CPU without x86-64-v4 support. Tuning alone does not guarantee better
-performance than every generic build: PGO, V8's JIT and GPU workloads matter.
-
-The small PKGBUILD delta is the validated `CHROMIUM_BUILD_JOBS` setting and
-the checksum of the modified `fetch-chromium-release` helper. Source checksum
-verification is enabled; builds do not rewrite checksums or use `--skipinteg`.
-The manually fetched Chromium Git tree is not itself covered by the tarball
-checksum: it is selected by its release tag, and a prefetched tree is trusted
-local input. The completion marker and version check are not a signature.
-
-## Prefetch and build
-
-Requirements: Linux, a compatible Zen 4 CPU, Docker available to your user,
-Bash, Git, coreutils, `flock`, and `bsdtar` (`libarchive` on Arch/CachyOS).
-Use an ordinary user account. Keep enough RAM and disk space available for a
-full Chromium build; 8 jobs is a concurrency limit, not a hard memory limit.
+Requirements: Linux with a compatible Zen 4 CPU, Docker access, Bash, Git,
+coreutils, `flock`, Python 3 and `bsdtar` (`libarchive` on CachyOS). Run as an
+ordinary user. Keep enough RAM/disk for a full Chromium build.
 
 ```bash
-./prefetch-chromium.sh
 ./cachyos-build.sh
 ```
 
-Prefetch uses the already-tested private Python 3.13 shim for depot_tools.
-You can enable WARP for this download, then disable it before starting the
-GitHub runner. Interrupted dependency downloads remain in staging and are
-retried on the next invocation. A lock prevents two prefetch processes from
-writing to the shared Git dependency cache. Completed caches are reused.
+This starts Docker if the local service is stopped, prepares the requested
+source cache if needed, builds and verifies the package. Docker is not enabled
+at boot. Completed caches are reused; interrupted downloads resume in staging.
+The same resolved Docker image is used for prefetch and compilation.
 
-Both helpers use the same layout:
+For Actions, start your installed runner with:
+
+```bash
+./scripts/run-runner.sh
+```
+
+This starts Docker and runs the runner once. It exits after one build/upload
+job. Hosted validation and release publishing finish independently.
+
+## Save your proxy once
+
+```bash
+mkdir -p ~/.config/ungoogled-chromium-cachyos
+cp -n config/build.env.example ~/.config/ungoogled-chromium-cachyos/build.env
+```
+
+Edit that file and uncomment this setting with **your actual HTTP or mixed
+listener port**:
+
+```bash
+CACHYOS_PROXY_URL=http://127.0.0.1:7890
+```
+
+7890 is an example. Use an HTTP proxy URL even for HTTPS destinations, which
+use CONNECT. A SOCKS-only port is unsuitable for this shortcut because the
+download tools do not all support SOCKS in the same way.
+
+The helpers pass upper/lowercase proxy variables into both containers for
+Git, depot_tools/gsutil, npm, Python and makepkg downloads. Pacman's proxy
+environment survives sudo inside the disposable container, including when
+makepkg installs dependencies. TLS/signature checks stay enabled; the host's
+sudoers file is not changed.
+
+A loopback proxy automatically selects `--network host` on normal Linux
+Docker Engine so the container can reach the laptop's listener. A non-loopback
+proxy uses bridge networking by default. Host networking shares the host's
+network namespace. For remote/rootless Docker contexts, use a proxy address
+reachable from that Docker host, rather than your laptop's `127.0.0.1`.
+
+The container proxy setting does not change desktop routing or the runner's
+GitHub connection. If the runner also needs a proxy, set
+`CACHYOS_RUNNER_PROXY_URL=http://127.0.0.1:YOUR_PORT` and use
+`./scripts/run-runner.sh`. Restart the runner to apply the setting.
+
+Existing `http_proxy`, `https_proxy`, `all_proxy` and `no_proxy` variables
+and their uppercase variants are forwarded. Lowercase takes precedence when
+the two variants disagree. Environment variables override the saved config;
+`CACHYOS_CONFIG_FILE` selects another trusted Bash configuration file.
+
+For a temporary override (works from fish or Bash):
+
+```bash
+env CACHYOS_PROXY_URL=http://127.0.0.1:YOUR_PORT ./cachyos-build.sh
+```
+
+Keep proxy passwords in the local file or an Actions secret. The helpers pass
+proxy variable names to Docker without logging their values or putting values
+in Docker's command arguments. Download programs may still report network
+details in their own diagnostics; inspect logs before sharing them.
+
+### Docker image pulls need the daemon's proxy
+
+Container environment variables do not configure the Docker daemon's image
+pulls. If `docker pull` is blocked, configure that daemon separately once.
+For systemd-managed Docker Engine, this is an example drop-in:
+
+```ini
+# /etc/systemd/system/docker.service.d/proxy.conf
+[Service]
+Environment="HTTP_PROXY=http://127.0.0.1:YOUR_PORT"
+Environment="HTTPS_PROXY=http://127.0.0.1:YOUR_PORT"
+Environment="NO_PROXY=localhost,127.0.0.1,::1"
+```
+
+Apply it while no build container is running:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+```
+
+A router-level proxy/TUN is also usable if it actually covers Docker traffic.
+Retries can handle interruptions; they cannot fix a blocked route.
+
+The image is pulled once per build by default. To deliberately reuse an
+already-downloaded image without pulling it again:
+
+```bash
+env CACHYOS_IMAGE_PULL=missing ./cachyos-build.sh
+```
+
+`always` is the default; `never` requires an existing local image. Failed
+pulls are reported rather than silently falling back to an older image.
+See [container proxies](https://docs.docker.com/engine/cli/proxy/),
+[daemon proxies](https://docs.docker.com/engine/daemon/proxy/) and
+[host networking](https://docs.docker.com/engine/network/drivers/host/).
+
+## GitHub Actions: less laptop work
+
+| Stage | Where it runs |
+| --- | --- |
+| Tests, Bash syntax, ShellCheck and Actionlint | GitHub-hosted Ubuntu |
+| Prefetch, compilation, verification and first artifact upload | Configured build runner |
+| Artifact download, checksum recheck and Release upload | GitHub-hosted Ubuntu |
+
+Ordinary pushes and PRs only validate. They do not start a multi-hour build.
+Compilation is explicit:
+
+| Trigger | Behavior |
+| --- | --- |
+| Ordinary push to `cachyos-znver4` or PR targeting it | Hosted validation only |
+| Push whose head commit starts with `[build]` | Validate, build and upload artifact |
+| Tag `znver4-VERSION-RELEASE` | Build, upload artifact, publish Release in the cloud |
+| Tag `znver4-upload-VERSION-RELEASE` | Reuse `CACHYOS_EXISTING_PACKAGE_PATH`, upload and publish |
+| Dispatch with empty `existing_package_path` | Build and upload artifact |
+| Dispatch with `existing_package_path` | Verify/upload existing package |
+
+PRs never execute on a self-hosted machine. Release tags must match PKGBUILD.
+A dispatch on a release tag also publishes it. Token presence and tag spelling
+are checked on the hosted validator before using the build machine.
+
+`master` remains upstream-only. GitHub's normal manual-dispatch UI/default-branch
+requirement still applies; do not rely on a **Run workflow** button while the
+workflow is absent from the default branch. A trusted build-request commit
+or tag works without GitHub CLI or modifying `master`.
+See [workflow_dispatch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
+
+Keep the repository secret `RELEASE_TOKEN` scoped to this repository, with
+Contents write and Workflows write when required for the target ref. It is
+available only to hosted release preflight/publishing steps, not to compilation.
+Presence alone does not prove permissions or expiry.
+
+If Release publishing fails after artifact upload, choose **Re-run failed
+jobs**. Only the hosted release job retries; the successful build is not rerun.
+The artifact must still exist (30-day retention). The laptop can finish its
+work after the build job completes, including package/diagnostic uploads.
+Failures before successful artifact upload still need that build runner.
+
+Reused packages must be outside the checkout and match PKGBUILD. Their original
+source revision is not inferred from the upload commit. Actions are pinned to
+commit hashes; the Actionlint archive has a pinned version and SHA-256.
+Checkout credentials are not persisted.
+
+## Move compilation to another machine
+
+Register an Actions runner on another **compatible Linux Zen 4 machine with Docker**
+and enough RAM/disk. Give it a distinct label and set this repository variable
+as JSON, for example:
+
+```text
+CACHYOS_BUILD_RUNNER=["self-hosted","Linux","X64","chromium-builder"]
+```
+
+The default remains `["self-hosted","Linux","X64","zen4"]`. The preflight
+checks baseline x86-64-v4 features; that check alone does not prove compatibility
+with every znver4-tuned tool or generated host program. Another Zen 4 system is
+the conservative choice. Install the same host requirements and configure that
+machine's proxy if necessary.
+
+This selects the builder; it does not provision or pay for a server. A LAN
+machine removes compilation from the laptop. A suitable overseas machine can
+also remove the GFW from its download path.
+
+A free standard GitHub Linux runner is not a validated full-build replacement.
+GitHub advertises 4 CPUs, 16 GB RAM, 14 GB SSD and a 6-hour hosted-job limit.
+Your successful build took about 5h18 on the 7940HS, and its source cache alone
+was around 26 GiB. Cleaning preinstalled tools is not proof of enough build
+space; standard labels also do not guarantee x86-64-v4 support.
+See [runner resources](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+and [Actions limits](https://docs.github.com/en/actions/reference/limits).
+
+Optional repository variables:
+
+- `CHROMIUM_BUILD_JOBS`: concurrency override; otherwise saved config/default 8.
+- `CHROMIUM_CACHE_DIR`: cache base on the selected runner.
+- `CACHYOS_MAKEPKG_IMAGE`: official image, optionally pinned by digest.
+- `CACHYOS_PROXY_URL`: container proxy; use a secret if it includes credentials.
+- `CACHYOS_EXISTING_PACKAGE_PATH`: absolute path for upload-only tags.
+- `CACHYOS_BUILD_RUNNER`: JSON runner labels.
+
+## Build settings, caches and outputs
+
+The official image is `cachyos/docker-makepkg-znver4:latest`. Package architecture
+is `x86_64_v4`; tuning comes from the image. The validated concurrency default
+remains **8**, including Ninja, Make and compression. Upstream system Clang,
+disabled Chrome PGO, ThinLTO, codecs, VA-API, Wayland/PipeWire and UC patches
+are preserved.
+
+Both helpers share this layout:
 
 ```text
 ~/.cache/ungoogled-chromium-cachyos/
@@ -52,45 +217,28 @@ Both helpers use the same layout:
     git-cache/
 ```
 
-Existing completed caches remain compatible. In **both** helpers,
-`CHROMIUM_CACHE_DIR` means the base directory containing `chromium-source`
-and `git-cache`, not `chromium-source` itself. To relocate it:
+`CHROMIUM_CACHE_DIR` means the cache base, not `chromium-source` itself.
+Existing completed caches remain compatible. A build lock serializes local
+and Actions builds sharing that cache; another lock protects prefetch.
 
-```bash
-env CHROMIUM_CACHE_DIR=/path/to/cache ./prefetch-chromium.sh
-env CHROMIUM_CACHE_DIR=/path/to/cache ./cachyos-build.sh
-```
+`./prefetch-chromium.sh` remains available for downloading only. It retains
+the private Python 3.13 shim for depot_tools. `CACHYOS_AUTO_PREFETCH=0` skips
+automatic prefetch and requires a completed cache for the requested version.
 
-Prefetch is recommended, especially when the runner and Chromium download
-need different network routes. Without a completed cache, the upstream
-makepkg prepare step fetches Chromium normally; that path also needs working
-depot_tools Python/network access in the build container.
+Each build uses a fresh `build-output/TIMESTAMP-PID/` directory. An explicit
+`CACHYOS_OUTPUT_DIR` must be empty. The source cache is read-only during build.
+Cancellation removes the prefetch/build container while preserving caches/logs.
+Outputs include the package, checksums, archive metadata, build environment,
+package list and logs. Actions artifacts last 30 days; diagnostics last 7 days.
+Actions temporary output directories may be cleaned after the job.
 
-Each build writes into a new `build-output/TIMESTAMP-PID/` directory. The
-helper prints the exact path. To choose a directory or lower parallelism:
+Source checksum verification remains enabled. Manual Chromium Git downloads
+are selected by release tag; caches are trusted local inputs, not signed
+archives. .BUILDINFO/provenance are metadata, not proof of source-to-binary
+correspondence. The image and upgraded container packages are recorded, without
+a reproducible-build guarantee.
 
-```bash
-env CHROMIUM_BUILD_JOBS=6 CACHYOS_OUTPUT_DIR=/path/to/empty-output ./cachyos-build.sh
-```
-
-The chosen output directory must be empty; previous packages are never
-silently deleted or mistaken for the result of a new build. The source cache
-is mounted read-only. The container is removed on completion/cancellation;
-the host-side `build.log` remains available even on failure. makepkg logs are
-exported on normal failure as well as success.
-
-`CACHYOS_MAKEPKG_IMAGE` can select an official image by digest to hold the base
-image constant. The build records the resolved image ID/digest, makepkg
-configuration, installed packages, recipe commit and dirty state. Pacman still
-performs a full upgrade inside the disposable container, so this metadata does
-not constitute a reproducible-build guarantee or a cryptographic attestation.
-
-## Verify and install
-
-Successful outputs include the package, `SHA256SUMS`, `package.PKGINFO`,
-`package.BUILDINFO`, `package.SRCINFO`, build-environment details and logs.
-The verifier requires exactly one package with the expected name, version
-and `x86_64_v4` architecture. It reads archive metadata, independent of locale.
+To verify and install:
 
 ```bash
 ./scripts/verify-package.sh /path/to/output
@@ -99,85 +247,15 @@ sha256sum -c SHA256SUMS
 sudo pacman -U ./ungoogled-chromium-*.pkg.tar.zst
 ```
 
-If `ungoogled-chromium-bin` is installed, remove that conflicting package
-first with `sudo pacman -Rns ungoogled-chromium-bin`.
-
-## GitHub Actions
-
-All jobs run on your self-hosted runner with labels
-`[self-hosted, Linux, X64, zen4]`. Use a current Actions runner compatible with
-Node 24 actions. Install Python 3 and `bsdtar` on the runner for validation;
-Docker and x86-64-v4 CPU features are checked for actual builds.
-
-Only trusted branch/tag pushes and manual dispatches run this workflow. There
-is no pull-request trigger on the self-hosted machine. Checkout credentials
-are not persisted. The normal GitHub token is read-only; the dedicated release
-token is exposed only to release-related steps. Actions are pinned to full
-commit hashes with version comments. The unused upstream staged-build action
-and its npm dependencies have been removed from this branch.
-
-Branch/tag jobs share one concurrency group. An in-progress build is allowed
-to finish; GitHub may replace an older **pending** run with a newer pending
-run. This prevents branch and tag builds from competing on the same runner.
-This does not serialize builds launched manually outside Actions.
-
-| Trigger | Behavior |
-| --- | --- |
-| Push build/helper/workflow changes to `cachyos-znver4` | Validate, build, verify, upload artifact |
-| Push tag `znver4-VERSION-RELEASE` | Build and publish a Release after verification |
-| Push tag `znver4-upload-VERSION-RELEASE` | Reuse the package in `CACHYOS_EXISTING_PACKAGE_PATH`, verify, publish |
-| Manual dispatch with empty `existing_package_path` | Build and upload artifact |
-| Manual dispatch with `existing_package_path` | Verify and upload an existing package |
-
-Tag names must match PKGBUILD's version/release exactly. A manual dispatch on
-a release tag also publishes that release. Keep reusable packages outside the
-runner checkout so `actions/checkout` cannot remove them. Reused packages must
-match PKGBUILD; their original build commit is **not** inferred from the commit
-running the upload workflow. `.BUILDINFO` is packaged metadata, not proof of
-source-to-binary correspondence.
-
-Optional repository variables:
-
-- `CHROMIUM_BUILD_JOBS`: default job count for push builds (otherwise 8).
-- `CHROMIUM_CACHE_DIR`: cache base on the runner; defaults to its user's cache.
-- `CACHYOS_EXISTING_PACKAGE_PATH`: absolute package path for upload-only tags.
-
-For Releases, keep the existing repository secret `RELEASE_TOKEN`. Scope it
-to this repository with the permissions needed by your release operation
-(Contents write; Workflows write when GitHub requires it for the target ref).
-Missing tokens and mismatched tags are rejected before compilation. A token
-presence check cannot prove that its permissions or expiry are correct.
-
-Since `master` stays upstream-only, the UI's **Run workflow** button may be
-absent. GitHub documents API/CLI dispatch of a workflow after its first run;
-use the registered numeric workflow ID with `--ref cachyos-znver4` if filename
-resolution on the default branch fails. Upload tags provide another route
-without changing `master` or committing one-shot absolute paths to the repo.
-See [GitHub's dispatch documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch).
-
-Artifacts include checksums and metadata and are retained for 30 days.
-Diagnostics are uploaded on success/failure and retained for 7 days. Artifact
-names include the run ID and attempt, avoiding collisions when rerunning jobs.
-Actions outputs use a run-specific directory under `RUNNER_TEMP`, outside the
-checkout; GitHub may clean that directory after the job, so download artifacts
-for long-term retention. Build logs are not uploaded as Release assets.
+The verifier requires exactly one package of the expected name, version,
+filename and v4 architecture, reading .PKGINFO directly.
 
 ## Maintain and validate
 
-Keep `master` aligned with upstream, then merge it into the customization
-branch without rewriting already-published history:
-
-```bash
-git fetch upstream
-git switch master
-git merge --ff-only upstream/master
-git push origin master
-git switch cachyos-znver4
-git merge master
-```
-
-Resolve packaging changes, refresh only checksums of files you intentionally
-changed, and validate before pushing. Follow Chromium security updates promptly.
+Merge upstream packaging updates into `cachyos-znver4` and inspect conflicts.
+Normal merges validate without compiling. Preserve the Ninja job limit and
+manual-fetch helper checksum during PKGBUILD conflicts. Chromium security
+updates still need a new build.
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -185,7 +263,7 @@ shellcheck -x cachyos-build.sh prefetch-chromium.sh fetch-chromium-release scrip
 actionlint
 ```
 
-The offline regression suite exercises cache publication/collisions, retries,
-version pinning, cancellation cleanup, invalid resource limits and package
-identity checks. It does not download Chromium or start Docker, and is not a
-replacement for compiling and installing the browser on the intended runner.
+Offline tests cover identity/checksums, cache publication/version pinning,
+cancellation, locks, config overrides, proxy propagation and route errors.
+They do not download Chromium or run real containers. Hosted checks use real
+archive tools. A full compile/install remains a separate validation step.

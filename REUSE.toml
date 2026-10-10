@@ -40,6 +40,7 @@ path = [
     "aur/**",
     ".github/**",
     "CACHYOS.md",
+    "config/**",
     "cachyos-build.sh",
     "prefetch-chromium.sh",
     "scripts/**",

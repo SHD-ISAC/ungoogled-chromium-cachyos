@@ -3,6 +3,9 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$repo_root"
+# shellcheck source=scripts/host-common.sh
+source "$repo_root/scripts/host-common.sh"
+load_build_config
 version="${1:-$(sed -n 's/^pkgver=//p' PKGBUILD)}"
 [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
     echo >&2 'Expected a Chromium version such as 153.0.8010.47'
@@ -45,13 +48,15 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo "==> Prefetching Chromium $version into $target"
-echo '==> You may use WARP for prefetch, then disable it before starting the GitHub runner.'
 if [[ ! -f $stage/chromium-$version/.ungoogled-chromium-cache-complete ]]; then
-    command -v docker >/dev/null
-    docker run --rm --init --pull=always --name "$builder_name" \
+    ensure_docker
+    container_network
+    resolve_build_image "$image"
+    docker run --rm --init --name "$builder_name" \
+        "${container_network_args[@]}" "${container_proxy_args[@]}" \
         -e CHROMIUM_VERSION="$version" -e GIT_CACHE_PATH=/git-cache \
         -v "$repo_root:/recipe:ro" -v "$stage:/work" -v "$git_cache:/git-cache" \
-        "$image" /bin/bash /recipe/scripts/container-prefetch.sh &
+        "$image_id" /bin/bash /recipe/scripts/container-prefetch.sh &
     wait "$!"
 fi
 

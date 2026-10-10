@@ -18,7 +18,7 @@ PACKAGE_VERSION = f"{VERSION}-{RELEASE}"
 MARKER = ".ungoogled-chromium-cache-complete"
 
 
-class Helpers(unittest.TestCase):
+class HelperFixtures(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -28,7 +28,14 @@ class Helpers(unittest.TestCase):
         self.log = self.work / "commands"
         self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
                         TEST_LOG=str(self.log), CHROMIUM_SOURCE_CACHE="",
-                        CHROMIUM_CACHE_DIR=str(self.work / "cache"))
+                        CHROMIUM_CACHE_DIR=str(self.work / "cache"),
+                        XDG_CONFIG_HOME=str(self.work / "config"),
+                        CACHYOS_START_DOCKER="never")
+        for key in ("CACHYOS_CONFIG_FILE", "CACHYOS_PROXY_URL", "CACHYOS_DOCKER_NETWORK", "CHROMIUM_BUILD_JOBS",
+                    "DOCKER_HOST", "CACHYOS_IMAGE_PULL", "CACHYOS_AUTO_PREFETCH",
+                    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+                    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"):
+            self.env.pop(key, None)
         self.env.pop("GITHUB_OUTPUT", None)
         self.env.pop("GIT_CONFIG_COUNT", None)
         self.mock("sleep", "exit 0")
@@ -55,6 +62,7 @@ class Helpers(unittest.TestCase):
         self.env["CHROMIUM_SOURCE_CACHE"] = str(parent)
         return source
 
+class Helpers(HelperFixtures):
     def test_cache_copy_preserves_cache_and_removes_marker_from_worktree(self):
         source = self.cache()
         self.mock("git", "exit 99")
@@ -157,9 +165,11 @@ class Helpers(unittest.TestCase):
         self.assertTrue((self.work / f"cache/chromium-source/chromium-{VERSION}" / MARKER).exists())
 
     def test_container_failure_is_reported_and_cleaned_up(self):
+        self.cache(parent=self.work / "cache/chromium-source")
         self.mock("docker", '''echo "$*" >> "$TEST_LOG"
 case "$1" in
-    pull|rm) exit 0 ;;
+    info|pull|rm) exit 0 ;;
+    context) echo default ;;
     image) echo sha256:fixture ;;
     run) echo 'compiler failed'; exit 37 ;;
     *) exit 99 ;;
@@ -181,11 +191,13 @@ esac''')
             self.assertIn("positive integer", result.stderr)
 
     def test_cancellation_removes_running_container(self):
+        self.cache(parent=self.work / "cache/chromium-source")
         self.env["CACHYOS_OUTPUT_DIR"] = str(self.work / "output")
         self.env["PID_FILE"] = str(self.work / "container.pid")
         self.mock("docker", '''echo "$*" >> "$TEST_LOG"
 case "$1" in
-    pull) exit 0 ;;
+    info|pull) exit 0 ;;
+    context) echo default ;;
     image) echo sha256:fixture ;;
     run) echo $$ > "$PID_FILE"; exec /bin/sleep 30 ;;
     rm) kill "$(cat "$PID_FILE")" ;;
