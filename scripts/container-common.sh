@@ -29,6 +29,12 @@ sync_databases() {
 }
 
 bootstrap_pacman() {
+    # makepkg also invokes sudo to install dependencies. Preserve only proxy
+    # variable names in this disposable container, so pacman uses the same route.
+    printf 'Defaults env_keep += "http_proxy https_proxy all_proxy no_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY"\n' |
+        sudo tee /etc/sudoers.d/99-chromium-proxy >/dev/null
+    sudo chmod 0440 /etc/sudoers.d/99-chromium-proxy
+    sudo visudo -cf /etc/sudoers.d/99-chromium-proxy >/dev/null
     # Some Docker hosts cannot apply pacman's Landlock download sandbox. Scope
     # this setting to [options] in the container, never to a repository section.
     if ! grep -q '^DisableSandbox' /etc/pacman.conf; then
