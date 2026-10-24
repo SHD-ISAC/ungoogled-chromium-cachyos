@@ -23,11 +23,14 @@ export_outputs() {
         fi
     fi
     sudo chown -R "$HOST_UID:$HOST_GID" /output || true
+    # Restore ownership of the shared source archives even after a failed build.
+    sudo chown -R "$HOST_UID:$HOST_GID" /source-downloads || true
     exit "$rc"
 }
 trap export_outputs EXIT
 
 bootstrap_pacman "$@"
+sudo chown -R "$(id -u):$(id -g)" /source-downloads
 
 # Exclude build products and checkout credentials, but keep local recipe edits.
 mkdir -p /tmp/pkg /home/notroot/packages
@@ -41,6 +44,7 @@ cd /tmp/pkg
 printf '\nMAKEFLAGS="-j%s"\nNINJAFLAGS="-j%s"\nCOMPRESSZST=(zstd -c -T%s --ultra -20 -)\n' \
     "$CHROMIUM_BUILD_JOBS" "$CHROMIUM_BUILD_JOBS" "$CHROMIUM_BUILD_JOBS" |
     sudo tee -a /etc/makepkg.conf >/dev/null
+printf '\nSRCDEST=/source-downloads\n' | sudo tee -a /etc/makepkg.conf >/dev/null
 {
     printf '\n--- Effective makepkg configuration ---\n'
     cat /etc/makepkg.conf

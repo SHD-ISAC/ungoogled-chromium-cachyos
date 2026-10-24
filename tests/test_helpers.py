@@ -5,6 +5,7 @@ import io
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -23,6 +24,7 @@ class HelperFixtures(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.work = Path(self.temp.name)
+        self.root = ROOT
         self.bin = self.work / "bin"
         self.bin.mkdir()
         self.log = self.work / "commands"
@@ -39,6 +41,7 @@ class HelperFixtures(unittest.TestCase):
         self.env.pop("GITHUB_OUTPUT", None)
         self.env.pop("GIT_CONFIG_COUNT", None)
         self.mock("sleep", "exit 0")
+        self.mock("lscpu", 'echo "Flags: cx16 lahf_lm popcnt pni ssse3 sse4_1 sse4_2 avx avx2 bmi1 bmi2 f16c fma abm movbe xsave avx512f avx512bw avx512cd avx512dq avx512vl"')
 
     def mock(self, name, body):
         path = self.bin / name
@@ -46,9 +49,18 @@ class HelperFixtures(unittest.TestCase):
         path.chmod(0o755)
 
     def run_script(self, script, *args, env=None):
-        return subprocess.run(["bash", str(ROOT / script), *map(str, args)],
+        return subprocess.run(["bash", str(self.root / script), *map(str, args)],
                               cwd=self.work, env=env or self.env,
                               text=True, capture_output=True, timeout=15)
+
+    def use_manual_recipe(self):
+        self.root = self.work / "recipe"
+        self.root.mkdir()
+        for name in ("PKGBUILD", "cachyos-build.sh", "prefetch-chromium.sh", "fetch-chromium-release"):
+            shutil.copy2(ROOT / name, self.root / name)
+        shutil.copytree(ROOT / "scripts", self.root / "scripts")
+        recipe = self.root / "PKGBUILD"
+        recipe.write_text(re.sub(r"^_manual_clone=.+$", "_manual_clone=1", recipe.read_text(), flags=re.M))
 
     def cache(self, version=VERSION, parent=None):
         parent = parent or self.work / "source-cache"
@@ -263,6 +275,16 @@ esac''')
         recipe = (ROOT / "PKGBUILD").read_text()
         expected = re.search(r"sha256sums\[0\]='([a-f0-9]+)'", recipe)[1]
         self.assertEqual(expected, hashlib.sha256((ROOT / "fetch-chromium-release").read_bytes()).hexdigest())
+
+    def test_all_local_recipe_source_checksums_match(self):
+        result = subprocess.run(["bash", "-c", 'source "$1"; for i in "${!source[@]}"; do '
+                                 'printf "%s\\0%s\\0" "${source[$i]}" "${sha256sums[$i]}"; done',
+                                 "--", str(ROOT / "PKGBUILD")], check=True, capture_output=True)
+        fields = result.stdout.decode().rstrip("\0").split("\0")
+        for source, digest in zip(fields[::2], fields[1::2]):
+            if "://" not in source:
+                with self.subTest(source=source):
+                    self.assertEqual(hashlib.sha256((ROOT / source).read_bytes()).hexdigest(), digest)
 
 
 if __name__ == "__main__":

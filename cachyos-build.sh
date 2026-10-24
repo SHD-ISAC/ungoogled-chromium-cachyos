@@ -7,18 +7,50 @@ cd "$repo_root"
 source "$repo_root/scripts/host-common.sh"
 load_build_config
 
+update=false
+check=false
+for option in "$@"; do
+    case $option in
+        --update) update=true ;;
+        --check) check=true ;;
+        -h|--help)
+            cat <<'EOF'
+Usage: ./cachyos-build.sh [--update] [--check]
+  --update  Fast-forward a clean cachyos-znver4 checkout, then continue.
+  --check   Check the host and show paths without downloading or building.
+  --help    Show this help.
+Without --check, prepare sources, compile and verify the package.
+EOF
+            exit 0 ;;
+        *) echo >&2 "Unknown option: $option (use --help)"; exit 2 ;;
+    esac
+done
+if [[ $update == true ]]; then
+    update_checkout "$repo_root"
+    # Run the updated helpers rather than continuing a script read before pull.
+    if [[ $check == true ]]; then exec "$repo_root/cachyos-build.sh" --check; fi
+    exec "$repo_root/cachyos-build.sh"
+fi
+
 image="${CACHYOS_MAKEPKG_IMAGE:-cachyos/docker-makepkg-znver4:latest}"
 jobs="${CHROMIUM_BUILD_JOBS:-8}"
 [[ $jobs =~ ^[1-9][0-9]*$ ]] || { echo >&2 'CHROMIUM_BUILD_JOBS must be a positive integer'; exit 1; }
-command -v docker >/dev/null
-command -v bsdtar >/dev/null
 auto_prefetch=${CACHYOS_AUTO_PREFETCH:-1}
 [[ $auto_prefetch == 0 || $auto_prefetch == 1 ]] || { echo >&2 'CACHYOS_AUTO_PREFETCH must be 0 or 1'; exit 1; }
+manual_clone=$(sed -n 's/^_manual_clone=//p' PKGBUILD)
+[[ $manual_clone == 0 || $manual_clone == 1 ]] || { echo >&2 'PKGBUILD must select _manual_clone=0 or 1'; exit 1; }
 
 # CHROMIUM_CACHE_DIR has the same meaning in both entry points: the cache base.
 cache_base="${CHROMIUM_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/ungoogled-chromium-cachyos}"
 source_cache="$cache_base/chromium-source"
-output_dir="${CACHYOS_OUTPUT_DIR:-$repo_root/build-output/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+source_downloads="$cache_base/source-downloads"
+output_dir="${CACHYOS_OUTPUT_DIR:-$HOME/Downloads/ungoogled-chromium-builds/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+if [[ $check == true ]]; then
+    check_build_environment "$repo_root" "$manual_clone" "$cache_base" "$output_dir" "$jobs"
+    exit 0
+fi
+require_build_tools
+verify_build_cpu
 mkdir -p "$source_cache" "$output_dir"
 exec 8>"$cache_base/.build.lock"
 flock -n 8 || { echo >&2 'Another build is using this cache; wait for it to finish'; exit 1; }
@@ -52,10 +84,17 @@ echo "==> Build image: $image"
 echo "==> Chromium source cache: $source_cache"
 echo "==> Output: $output_dir"
 echo "==> Parallel jobs: $jobs"
+if [[ $manual_clone == 0 ]]; then
+    echo '==> Source: upstream archive with makepkg checksum verification (no Git prefetch)'
+else
+    echo '==> Source: version-pinned Chromium Git cache'
+fi
 ensure_docker
 container_network
 resolve_build_image "$image"
-if [[ $auto_prefetch == 1 ]]; then
+if [[ $manual_clone == 0 ]]; then
+    : # makepkg downloads the upstream archive directly into the shared cache.
+elif [[ $auto_prefetch == 1 ]]; then
     # Prefetch and compile with exactly the same image. Cache hits do no download.
     env CACHYOS_MAKEPKG_IMAGE="$image_id" CACHYOS_IMAGE_PULL=never \
         "$repo_root/prefetch-chromium.sh" > >(tee "$output_dir/prefetch.log") 2>&1 &
@@ -69,8 +108,12 @@ else
         exit 1
     }
 fi
+lock_package_cache "$cache_base"
+mkdir -p "$source_downloads"
+source_downloads=$(realpath "$source_downloads")
 {
     printf 'image=%s\nimage_id=%s\njobs=%s\n' "$image" "$image_id" "$jobs"
+    printf 'manual_clone=%s\n' "$manual_clone"
     if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         printf 'recipe_commit=%s\n' "$(git rev-parse HEAD)"
         printf 'recipe_dirty=%s\n' "$(test -z "$(git status --porcelain)" && echo false || echo true)"
@@ -89,6 +132,8 @@ docker run --rm --init --name "$builder_name" \
     -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
     -v "$repo_root:/recipe:ro" \
     -v "$source_cache:/source-cache:ro" \
+    -v "$package_cache:/var/cache/pacman/pkg" \
+    -v "$source_downloads:/source-downloads" \
     -v "$output_dir:/output" \
     "$image_id" /bin/bash /recipe/scripts/container-build.sh \
     > >(tee "$output_dir/build.log") 2>&1 &

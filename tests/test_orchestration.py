@@ -1,5 +1,6 @@
 """Exercise proxy routing and automatic prefetch without starting real containers."""
 import fcntl
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -80,6 +81,7 @@ esac''')
         self.assertIn("reachable from the Docker host", result.stderr)
 
     def test_missing_source_is_prefetched_automatically_and_reused_next_time(self):
+        self.use_manual_recipe()
         self.docker('''if [[ ${@: -1} == /recipe/scripts/container-prefetch.sh ]]; then
     for arg in "$@"; do
         case "$arg" in
@@ -102,8 +104,10 @@ exit 37''')
         self.assertEqual(sum("container-prefetch.sh" in line for line in commands), 1)
         self.assertEqual(sum(line.startswith("pull ") for line in commands), 2)
         self.assertEqual(sum("container-build.sh" in line for line in commands), 2)
+        self.assertEqual(sum(f"{self.work}/cache/pacman:/var/cache/pacman/pkg" in line for line in commands), 3)
 
     def test_no_automatic_prefetch_fails_early_without_a_completed_cache(self):
+        self.use_manual_recipe()
         self.docker()
         self.env.update(CACHYOS_AUTO_PREFETCH="0", CACHYOS_OUTPUT_DIR=str(self.work / "output"))
         result = self.run_script("cachyos-build.sh")
@@ -170,6 +174,7 @@ esac''')
         self.assertEqual(result.stdout, "--once|http://192.0.2.2:7890")
 
     def test_cancellation_during_automatic_prefetch_removes_its_container(self):
+        self.use_manual_recipe()
         self.env.update(CACHYOS_OUTPUT_DIR=str(self.work / "output"),
                         PID_FILE=str(self.work / "prefetch.pid"))
         # Killing the Docker client models removing the named container.
@@ -182,7 +187,7 @@ case "$1" in
     rm) if [[ $* == *prefetch* ]]; then kill "$(cat "$PID_FILE")"; fi ;;
     *) exit 99 ;;
 esac''')
-        process = subprocess.Popen(["bash", str(ROOT / "cachyos-build.sh")],
+        process = subprocess.Popen(["bash", str(self.root / "cachyos-build.sh")],
                                    cwd=self.work, env=self.env, text=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
@@ -198,6 +203,122 @@ esac''')
             if process.poll() is None:
                 process.kill()
                 process.communicate(timeout=5)
+
+    def test_archive_mode_skips_git_prefetch_and_keeps_both_download_caches(self):
+        self.docker()
+        for invocation in (1, 2):
+            self.env.update(CACHYOS_AUTO_PREFETCH="0", CACHYOS_OUTPUT_DIR=str(self.work / f"output-{invocation}"))
+            result = self.run_script("cachyos-build.sh")
+            self.assertEqual(result.returncode, 37, result.stdout + result.stderr)
+        commands = self.log.read_text()
+        self.assertNotIn("container-prefetch.sh", commands)
+        self.assertEqual(commands.count(f"{self.work}/cache/pacman:/var/cache/pacman/pkg"), 2)
+        self.assertEqual(commands.count(f"{self.work}/cache/source-downloads:/source-downloads"), 2)
+
+    def test_download_cache_lock_prevents_concurrent_pacman_containers(self):
+        self.docker()
+        cache = self.work / "cache"
+        cache.mkdir()
+        self.env["CACHYOS_OUTPUT_DIR"] = str(self.work / "output")
+        with (cache / ".packages.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.run_script("cachyos-build.sh")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("package download cache", result.stderr)
+        self.assertNotIn("container-build.sh", self.log.read_text())
+
+    def test_check_does_not_start_docker_download_or_create_directories(self):
+        self.docker()
+        self.env["CACHYOS_PROXY_URL"] = "http://fixture:secret@127.0.0.1:7890"
+        result = self.run_script("cachyos-build.sh", "--check")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.work / "cache").exists())
+        self.assertNotIn("secret", result.stdout + result.stderr + self.log.read_text())
+        self.assertIn(str(Path(os.environ["HOME"]) / "Downloads/ungoogled-chromium-builds"), result.stdout)
+        self.assertIn("no Git prefetch", result.stdout)
+        self.assertTrue(all(line in ("context show", "info") for line in self.log.read_text().splitlines()))
+
+    def test_incompatible_cpu_fails_before_docker_or_cache_creation(self):
+        self.docker()
+        self.mock("lscpu", 'echo "Flags: avx avx2"')
+        result = self.run_script("cachyos-build.sh")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Missing x86-64-v4 CPU flag", result.stderr)
+        self.assertFalse((self.work / "cache").exists())
+        self.assertFalse(self.log.exists())
+
+    def test_unknown_build_options_fail_without_side_effects(self):
+        self.docker()
+        result = self.run_script("cachyos-build.sh", "--updat")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Unknown option", result.stderr)
+        self.assertFalse((self.work / "cache").exists())
+        self.assertFalse(self.log.exists())
+
+    def git(self, path, *args):
+        return subprocess.run(["git", "-C", str(path), "-c", "user.name=Fixture",
+                               "-c", "user.email=fixture@example.invalid", *args],
+                              check=True, text=True, capture_output=True).stdout.strip()
+
+    def update_fixture(self):
+        self.use_manual_recipe()
+        self.git(self.root, "init", "-q", "-b", "cachyos-znver4")
+        self.git(self.root, "add", ".")
+        self.git(self.root, "commit", "-qm", "initial")
+        remote = self.work / "remote"
+        subprocess.run(["git", "clone", "-q", str(self.root), str(remote)], check=True)
+        self.git(self.root, "remote", "add", "origin", str(remote))
+        self.env["CI"] = "false"
+        return remote
+
+    def test_update_fast_forwards_clean_checkout_and_runs_the_updated_script(self):
+        remote = self.update_fixture()
+        (remote / "cachyos-build.sh").write_text('#!/usr/bin/env bash\nprintf "updated:%s" "$*"\n')
+        self.git(remote, "add", ".")
+        self.git(remote, "commit", "-qm", "updated helper")
+        result = self.run_script("cachyos-build.sh", "--update", "--check")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("updated:--check", result.stdout)
+        self.assertEqual(self.git(self.root, "rev-parse", "HEAD"), self.git(remote, "rev-parse", "HEAD"))
+
+    def test_update_preserves_uncommitted_changes_and_does_not_fetch(self):
+        self.update_fixture()
+        local = self.root / "local-settings"
+        local.write_text("keep this")
+        result = self.run_script("cachyos-build.sh", "--update")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Commit or stash", result.stderr)
+        self.assertFalse((self.root / ".git/FETCH_HEAD").exists())
+        self.assertEqual(local.read_text(), "keep this")
+
+    def test_update_rejects_diverged_history_without_resetting_local_commits(self):
+        remote = self.update_fixture()
+        (self.root / "local").touch()
+        self.git(self.root, "add", ".")
+        self.git(self.root, "commit", "-qm", "local work")
+        local_head = self.git(self.root, "rev-parse", "HEAD")
+        (remote / "upstream").touch()
+        self.git(remote, "add", ".")
+        self.git(remote, "commit", "-qm", "remote work")
+        result = self.run_script("cachyos-build.sh", "--update")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.git(self.root, "rev-parse", "HEAD"), local_head)
+        self.assertTrue((self.root / "local").exists())
+
+    def test_update_uses_proxy_without_putting_credentials_in_git_arguments(self):
+        self.docker()
+        self.env.update(CI="false", CACHYOS_PROXY_URL="http://fixture:secret@127.0.0.1:7890")
+        self.mock("git", '''case "$*" in
+    *"branch --show-current") echo cachyos-znver4 ;;
+    *"status --porcelain") exit 0 ;;
+    *"fetch origin"*)
+        [[ $http_proxy == "$CACHYOS_PROXY_URL" && $https_proxy == "$CACHYOS_PROXY_URL" ]]
+        echo "$*" >> "$TEST_LOG"; exit 29 ;;
+    *) exit 99 ;;
+esac''')
+        result = self.run_script("cachyos-build.sh", "--update")
+        self.assertEqual(result.returncode, 29, result.stderr)
+        self.assertNotIn("secret", self.log.read_text() + result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

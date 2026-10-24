@@ -154,7 +154,7 @@ jobs:
           free -h
           df -h "$RUNNER_TEMP"
 
-      - name: Prefetch and build with official CachyOS znver4 environment
+      - name: Prepare sources and build with official CachyOS znver4 environment
         if: ${{ steps.mode.outputs.reuse != 'true' }}
         env:
           ACTIONS_BUILD_JOBS: ${{ inputs.build_jobs || vars.CHROMIUM_BUILD_JOBS }}

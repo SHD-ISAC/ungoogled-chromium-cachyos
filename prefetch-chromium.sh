@@ -52,10 +52,12 @@ if [[ ! -f $stage/chromium-$version/.ungoogled-chromium-cache-complete ]]; then
     ensure_docker
     container_network
     resolve_build_image "$image"
+    lock_package_cache "$cache_base"
     docker run --rm --init --name "$builder_name" \
         "${container_network_args[@]}" "${container_proxy_args[@]}" \
         -e CHROMIUM_VERSION="$version" -e GIT_CACHE_PATH=/git-cache \
         -v "$repo_root:/recipe:ro" -v "$stage:/work" -v "$git_cache:/git-cache" \
+        -v "$package_cache:/var/cache/pacman/pkg" \
         "$image_id" /bin/bash /recipe/scripts/container-prefetch.sh &
     wait "$!"
 fi

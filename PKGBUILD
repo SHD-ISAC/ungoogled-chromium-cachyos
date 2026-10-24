@@ -5,20 +5,21 @@
 
 # Maintainer: Christian Heusel <gromit@archlinux.org>
 # Maintainer: Jonathan Grotelüschen <tippfehlr@archlinux.org>
+# Maintainer: DeepChirp <deepchirp@archlinux.org>
 # Contributor: Evangelos Foutras <foutrelis@archlinux.org>
 # Contributor: Pierre Schmitz <pierre@archlinux.de>
 # Contributor: Jan "heftig" Steffens <jan.steffens@gmail.com>
 # Contributor: Daniel J Griffiths <ghost1227@archlinux.us>
 
 pkgname=ungoogled-chromium
-pkgver=153.0.8010.52
+pkgver=156.0.8078.47
 pkgrel=1
 _launcher_ver=8
-_manual_clone=1
+_manual_clone=0
 _system_clang=1
 # ungoogled chromium variables
 _uc_usr=ungoogled-software
-_uc_ver=153.0.8010.52-1
+_uc_ver=156.0.8078.47-1
 pkgdesc="A lightweight approach to removing Google web service dependency"
 arch=('x86_64')
 url="https://github.com/ungoogled-software/ungoogled-chromium"
@@ -64,6 +65,7 @@ depends=(
 makedepends=(
   'clang'
   'compiler-rt'
+  'esbuild'
   'git'
   'gn'
   'go'
@@ -79,6 +81,7 @@ makedepends=(
   'rust-bindgen'
   'rust'
   'typescript'
+  'vulkan-headers'
 )
 optdepends=('pipewire: WebRTC desktop sharing under Wayland'
             'kdialog: support for native dialogs in Plasma'
@@ -94,40 +97,44 @@ source=(https://commondatastorage.googleapis.com/chromium-browser-official/chrom
         https://github.com/foutrelis/chromium-launcher/archive/v$_launcher_ver/chromium-launcher-$_launcher_ver.tar.gz
         chromium-138-nodejs-version-check.patch
         chromium-145-fix-SYS_SECCOMP.patch
-        chromium-147-revert-clang-no-lifetime-dse-flag.patch
         chromium-147-rust-1.95-bytemuck.patch
-        chromium-149-drop-unknown-clang-flag.patch
+        chromium-147-simdutf-8.0-base-char.patch
         chromium-149-use-of-undeclared-identifier-ERROR.patch
         chromium-150-revert-avx-flag-change.patch
-        chromium-152-fix-gn-no-public_inputs.patch
         chromium-152-unbundle-minizip-undo-unicode.patch
         chromium-152-unbundle-opus-devtools.patch
         chromium-153-hermetic-python.patch
         chromium-153-iamf-tools-unbundled-opus.patch
-        chromium-153-typescript.patch
-        chromium-153-crubit.patch
+        chromium-155-use-system-esbuild.patch
+        chromium-156-crubit.patch
+        chromium-156-remove-private_verification_tokens.patch
+        chromium-156-revert-gn-check-includes.patch
+        chromium-156-typescript.patch
+        chromium-156-isolatedDeclarations.patch
         compiler-rt-adjust-paths.patch
         increase-fortify-level.patch
         enable-widevine-arm64.patch
         use-oauth2-client-switches-as-default.patch
         glibc-2.42-baud-rate-fix.patch)
-sha256sums=('645f64566cfbb780747430d53ff3656f03639f89fed9544c1eadd4c17e7b1c82'
-            'c98a3a5c243471522d8aefc079f62bdcbc7b953e34dc6187197e4abff03a0a94'
+sha256sums=('28432028890ef70e1f2e9db880c500907ad1b04f5ae6b655a3f394b9f2eaa705'
+            'acf73f8fab3fa7a4977f54e4e51b206eaf6cc425c2294ecc4dc8023fd093bd2d'
             '213e50f48b67feb4441078d50b0fd431df34323be15be97c55302d3fdac4483a'
             '11a96ffa21448ec4c63dd5c8d6795a1998d8e5cd5a689d91aea4d2bdd13fb06e'
             '4fc040a0656a0a524dd8ad090cd129fc5b6cb21adcc66be82080165789e8c13e'
-            'c382830318c5b37826ecf44f3ba9def6be8affdad1bce819ecb83f3222ff4b3a'
             'b9e6339221efe03540ffb360c161d93604a1fc93a5a1c53e5e9849066f987d05'
-            '1b5190fa030850cf30a97dc90e35b31f3097243c88743fbfaedbd64ea80f1327'
+            '80e445d7a5cbd61d1252ecf46c5eaf0fb4a5e63bd1b9c976261df778a4586640'
             '951514535be65f0e2f84e82305d96292be1da353c1427ba1048ea24be70003c4'
             '5f6ccb7b945c8a13c690493723bad816b36f2f25792d47e677b56f8200907e60'
-            '50115642099ac131f40c419cbd12ed72e352538002d4bdc11ab657335891d03b'
             '890e5d98088ef1c7c075a551442f03385d1db266cad8a65576704a22720683f9'
             '3276453f2ce655b6286476f48d4df837be952d9447afa46583f79ec71f2288c3'
             'ebf74154266d0b6d6cc957c413f845052c5fcfce7745befb8821595cdf3f7d49'
             '2ab9fbe653829ce692f83ee780aad07e8c83a6686e51ab9459ad736cfa2850ee'
-            '44c86a7c26d726559d5bd06a64f81e6bcced7ab4dc949c899e4fd2c64ff37a16'
-            'a20e615fa03713e464fc3f2966c84e2130b6d942a4c8b5919ba0bf8320d39ed4'
+            'ded2abcb912ac4b6ad139e56384eea8f3b470cf57ecb0baa2c2d042df7575a23'
+            '0c8bd7769496ab71116cd73ac17c096b0979fa70fb2e76676f76d34c7424449e'
+            '8170368b531a0ae70071da054db4a09a6902b8b7854083d5505570f86a73e644'
+            'c666f9b009d3a2c737501d714689677e6d474982695966651fe7cdbcbc6e5815'
+            '946d4f70daeb446b911197bca804983d305c0ee809bc5507d05451bd07fe9523'
+            'f6aefbd3f70dbda9242cf815a1dca56af729632166bc57e5067755b119cc95de'
             'ec8e49b7114e2fa2d359155c9ef722ff1ba5fe2c518fa48e30863d71d3b82863'
             'd634d2ce1fc63da7ac41f432b1e84c59b7cceabf19d510848a7cff40c8025342'
             '5ee4bb69379ac0cea7946c9f8f4ca9e20e0a9e4ee2ee9121eb0ebbb94dd7e928'
@@ -145,6 +152,7 @@ fi
 declare -gA _system_libs=(
   [brotli]=brotli
   [dav1d]=dav1d
+  [double-conversion]=double-conversion
   #[ffmpeg]=ffmpeg    # YouTube playback stopped working in Chromium 120
   [flac]=flac
   [fontconfig]=fontconfig
@@ -165,6 +173,7 @@ declare -gA _system_libs=(
   [openh264]=openh264
   [opus]=opus
   #[re2]=re2          # needs libstdc++
+  [simdutf]=simdutf
   #[snappy]=snappy    # needs libstdc++
   #[woff2]=woff2      # needs libstdc++
   [zlib]=minizip
@@ -210,17 +219,6 @@ prepare() {
   # Increase _FORTIFY_SOURCE level to match Arch's default flags
   patch -Np1 -i ../increase-fortify-level.patch
 
-  # clang 22 lacks -fsanitize-ignore-for-ubsan-feature, which is needed to use
-  # -fsanitize=array-bounds without triggering UBSan feature detection. Without
-  # feature detection suppression, V8 compiles in __sanitizer_set_death_callback
-  # calls that require the UBSan runtime, which is not linked in a trap-mode
-  # build. Drop the entire sanitize_c_array_bounds cflags block.
-  # Can be dropped when arch has LLVM 23.
-  patch -Np1 -i ../chromium-149-drop-unknown-clang-flag.patch
-
-  # Causes a build failure with our clang version
-  patch -Np1 -i ../chromium-147-revert-clang-no-lifetime-dse-flag.patch
-
   # https://crbug.com/456218403
   patch -Np1 -i ../chromium-145-fix-SYS_SECCOMP.patch
 
@@ -238,8 +236,8 @@ prepare() {
   # Credit: https://github.com/ungoogled-software/ungoogled-chromium/pull/3837
   patch -Np1 -i ../chromium-150-revert-avx-flag-change.patch
 
-  # Just the reverted commit 8dab8b761385b7946588232e4e2a8c116f9293c3
-  patch -Np1 -i "$srcdir/chromium-152-fix-gn-no-public_inputs.patch" -d third_party/devtools-frontend/src
+  # To unbundle simdutf
+  patch -Np1 -i ../chromium-147-simdutf-8.0-base-char.patch
 
   patch -Np1 -i ../chromium-152-unbundle-minizip-undo-unicode.patch
 
@@ -254,12 +252,23 @@ prepare() {
   # for the unbundled system Opus build
   patch -Np1 -i ../chromium-153-iamf-tools-unbundled-opus.patch
 
+  patch -Np1 -i ../chromium-155-use-system-esbuild.patch
+
+  patch -Np1 -i ../chromium-156-crubit.patch
+
+  patch -Np1 -i ../chromium-156-remove-private_verification_tokens.patch
+
+  patch -Np1 -i ../chromium-156-revert-gn-check-includes.patch
+
+  patch -Np1 -i ../chromium-156-isolatedDeclarations.patch
+
   # Work around TypeScript becoming a build dependency: disable tsgo for the
   # WebUI and point devtools at the system tsc binary
-  # https://github.com/ungoogled-software/ungoogled-chromium/pull/3946
-  patch -Np1 -i ../chromium-153-typescript.patch
+  # https://github.com/ungoogled-software/ungoogled-chromium/pull/3966
+  patch -Np1 -i ../chromium-156-typescript.patch
 
-  patch -Np1 -i ../chromium-153-crubit.patch
+  rm -rf third_party/devtools-frontend/src/node_modules/esbuild/
+  ln -s /usr/lib/node_modules/esbuild/ third_party/devtools-frontend/src/node_modules/esbuild
 
   if (( !_system_clang )); then
     # Use prebuilt rust as system rust cannot be used due to the error:
@@ -286,7 +295,7 @@ prepare() {
            third_party/rust-toolchain/bin \
            third_party/jdk/current/bin \
            third_party/gperf/cipd/bin \
-           third_party/dawn/tools/golang/linux-amd64/bin
+           third_party/dawn/tools/golang/linux-amd64/bin \
 
   ln -s /usr/bin/node third_party/node/linux/node-linux-x64/bin/
   ln -s /usr/bin/java third_party/jdk/current/bin/
@@ -299,9 +308,16 @@ prepare() {
   # added benefit of not having to list all the remaining libraries
   local _lib
   for _lib in ${_unwanted_bundled_libs[@]}; do
-    find "third_party/$_lib" -type f \
-      \! -path "third_party/$_lib/chromium/*" \
-      \! -path "third_party/$_lib/google/*" \
+    # Most bundled libraries live under `third_party/<lib>`, but
+    # `double-conversion` is located under `base/third_party/double_conversion`
+    local _dir="third_party/$_lib"
+    if [[ ! -d "${_dir}" ]]; then
+      _dir="base/third_party/${_lib//-/_}"
+    fi
+
+    find "$_dir" -type f \
+      \! -path "$_dir/chromium/*" \
+      \! -path "$_dir/google/*" \
       \! -path "third_party/harfbuzz-ng/utils/hb_scoped.h" \
       \! -regex '.*\.\(gn\|gni\|isolate\)' \
       -delete
@@ -378,12 +394,15 @@ build() {
   if (( _system_clang )); then
     local _clang_version=$(
       clang --version | grep -m1 version | sed 's/.* \([0-9]\+\).*/\1/')
+    local _site_packages=$(python -c "import site; print(site.getsitepackages()[0])")
 
     _flags+=(
       'clang_base_path="/usr"'
       'clang_use_chrome_plugins=false'
       "clang_version=\"$_clang_version\""
       'chrome_pgo_phase=0' # needs newer clang to read the bundled PGO profile
+      'v8_metagen_libclang_so="/usr/lib/libclang.so"'
+      "v8_metagen_libclang_bindings_dir=\"$_site_packages\""
     )
 
     # Allow the use of nightly features with stable Rust compiler
@@ -449,7 +468,9 @@ package() {
   sed -i \
     -e 's/@@MENUNAME/Chromium/g' \
     -e 's/@@PACKAGE/chromium/g' \
-    -e 's/@@usr_bin_symlink_name/chromium/g' \
+    -e 's/@@desktop_exec/chromium/g' \
+    -e 's/@@desktop_icon/chromium/g' \
+    -e 's/@@startup_wm_class/chromium/g' \
     -e 's|@@uri_scheme|x-scheme-handler/chromium;|g' \
     -e 's/@@extra_desktop_entries//g' \
     "$pkgdir/usr/share/applications/chromium.desktop" \
