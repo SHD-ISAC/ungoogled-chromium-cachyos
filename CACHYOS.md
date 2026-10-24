@@ -16,9 +16,49 @@ ordinary user. Keep enough RAM/disk for a full Chromium build.
 ```
 
 This starts Docker if the local service is stopped, prepares the requested
-source cache if needed, builds and verifies the package. Docker is not enabled
-at boot. Completed caches are reused; interrupted downloads resume in staging.
-The same resolved Docker image is used for prefetch and compilation.
+sources, builds and verifies the package. Docker is not enabled at boot.
+The source method follows PKGBUILD automatically:
+
+- `_manual_clone=0` (current upstream default): makepkg downloads the upstream
+  Chromium source archive and checks its SHA-256. No Chromium Git prefetch,
+  depot_tools checkout or Python 3.13 prefetch container is needed.
+- `_manual_clone=1`: prepare/reuse the version-pinned Git source cache.
+  Interrupted downloads resume in staging; prefetch and compilation use the
+  same resolved Docker image.
+
+Source archives and Pacman packages are cached between attempts. This avoids
+downloading unchanged dependencies again when retrying a failed build; it does
+not resume compiled object files. Signature and source checksum verification
+remain enabled. Existing caches and outputs are not deleted automatically.
+
+Before a long build, check your host without starting Docker, pulling images,
+downloading sources or creating output directories:
+
+```bash
+./cachyos-build.sh --check
+```
+
+It checks required host tools and baseline x86-64-v4 CPU flags, shows Docker
+availability, source mode, cache/output paths and filesystem space. It does not
+test remote downloads or promise enough free build space; a compatible Zen 4
+host and enough RAM/disk are still required.
+
+After obtaining this version of the script, update and build with one command
+(also works in fish):
+
+```bash
+./cachyos-build.sh --update
+```
+
+This fetches `origin/cachyos-znver4`, fast-forwards the local branch and runs the
+updated script. It requires a clean local `cachyos-znver4` checkout, refuses
+diverged history, and never resets/stashes your changes. Saved HTTP proxy
+settings also apply to this Git fetch when the origin uses HTTPS. Use
+`--update --check` to update and inspect without compiling. Update mode is
+disabled in CI. It updates from this fork; upstream merges happen in GitHub.
+
+Default outputs are under `~/Downloads/ungoogled-chromium-builds/TIMESTAMP-PID/`.
+An explicit `CACHYOS_OUTPUT_DIR` still overrides that location.
 
 For Actions, start your installed runner with:
 
@@ -47,8 +87,8 @@ CACHYOS_PROXY_URL=http://127.0.0.1:7890
 use CONNECT. A SOCKS-only port is unsuitable for this shortcut because the
 download tools do not all support SOCKS in the same way.
 
-The helpers pass upper/lowercase proxy variables into both containers for
-Git, depot_tools/gsutil, npm, Python and makepkg downloads. Pacman's proxy
+The helpers pass upper/lowercase proxy variables into the containers for
+Git, depot_tools/gsutil when needed, npm, Python and makepkg downloads. Pacman's proxy
 environment survives sudo inside the disposable container, including when
 makepkg installs dependencies. TLS/signature checks stay enabled; the host's
 sudoers file is not changed.
@@ -215,17 +255,23 @@ Both helpers share this layout:
     chromium-source/chromium-VERSION/
     chromium-source/.prefetch-VERSION/
     git-cache/
+    source-downloads/
+    pacman/
 ```
 
 `CHROMIUM_CACHE_DIR` means the cache base, not `chromium-source` itself.
 Existing completed caches remain compatible. A build lock serializes local
-and Actions builds sharing that cache; another lock protects prefetch.
+and Actions builds sharing that cache; another lock protects Git prefetch.
+A shared package-cache lock prevents concurrent Pacman containers from racing
+on partial downloads. `source-downloads` holds makepkg archives; `pacman`
+holds downloaded dependency packages. Neither is a compiled-object cache.
 
-`./prefetch-chromium.sh` remains available for downloading only. It retains
-the private Python 3.13 shim for depot_tools. `CACHYOS_AUTO_PREFETCH=0` skips
-automatic prefetch and requires a completed cache for the requested version.
+`./prefetch-chromium.sh` remains available for Git-source downloading only.
+It retains the private Python 3.13 shim for depot_tools. In Git mode,
+`CACHYOS_AUTO_PREFETCH=0` requires a completed cache for the requested version.
+In archive mode this switch is unnecessary: no Git prefetch is attempted.
 
-Each build uses a fresh `build-output/TIMESTAMP-PID/` directory. An explicit
+Each build uses a fresh `~/Downloads/ungoogled-chromium-builds/TIMESTAMP-PID/` directory. An explicit
 `CACHYOS_OUTPUT_DIR` must be empty. The source cache is read-only during build.
 Cancellation removes the prefetch/build container while preserving caches/logs.
 Outputs include the package, checksums, archive metadata, build environment,
@@ -233,7 +279,7 @@ package list and logs. Actions artifacts last 30 days; diagnostics last 7 days.
 Actions temporary output directories may be cleaned after the job.
 
 Source checksum verification remains enabled. Manual Chromium Git downloads
-are selected by release tag; caches are trusted local inputs, not signed
+are selected by release tag; Git caches are trusted local inputs, not signed
 archives. .BUILDINFO/provenance are metadata, not proof of source-to-binary
 correspondence. The image and upgraded container packages are recorded, without
 a reproducible-build guarantee.

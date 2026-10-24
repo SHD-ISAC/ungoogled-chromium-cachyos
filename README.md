@@ -1,7 +1,9 @@
 # ungoogled-chromium-archlinux
 
-**CachyOS fork:** one command prepares the source cache and builds on your
-Zen 4 runner. Proxy settings can be saved once; GitHub handles validation and
+**CachyOS fork:** `./cachyos-build.sh --update` updates and builds on your
+Zen 4 runner; `--check` inspects the host without compiling. Sources follow
+the upstream archive/Git mode, and downloads are cached across attempts.
+Proxy settings can be saved once; GitHub handles validation and
 release publishing separately. See [CACHYOS.md](CACHYOS.md) for setup and remote
 builder options. The upstream README below is retained for reference.
 

@@ -1,6 +1,93 @@
 #!/usr/bin/env bash
 # Shared host setup. Proxy settings apply to child containers, not the desktop.
 
+require_build_tools() {
+    local tool missing=0
+    for tool in docker bsdtar git flock lscpu python3 realpath find tee sha256sum tar; do
+        if ! command -v "$tool" >/dev/null; then
+            echo >&2 "Missing command: $tool"
+            missing=1
+        fi
+    done
+    ((missing == 0)) || {
+        echo >&2 'On CachyOS, install missing host tools from docker, libarchive, git, util-linux, python and coreutils.'
+        return 1
+    }
+}
+
+verify_build_cpu() {
+    local flags flag
+    flags=" $(LC_ALL=C lscpu | sed -n 's/^Flags:[[:space:]]*//p') "
+    local required=(cx16 lahf_lm popcnt pni ssse3 sse4_1 sse4_2 avx avx2 bmi1 bmi2 f16c fma abm movbe xsave
+        avx512f avx512bw avx512cd avx512dq avx512vl)
+    for flag in "${required[@]}"; do
+        [[ $flags == *" $flag "* ]] || {
+            echo >&2 "Missing x86-64-v4 CPU flag: $flag. Use a compatible Zen 4 Linux build host."
+            return 1
+        }
+    done
+}
+
+check_build_environment() {
+    local root=$1 mode=$2 cache=$3 output=$4 jobs_count=$5
+    require_build_tools
+    verify_build_cpu
+    container_network
+    printf '==> Host tools and baseline x86-64-v4 flags: OK\n'
+    printf '==> Recipe: %s\n' "$(sed -n 's/^pkgver=//p' "$root/PKGBUILD")"
+    printf '==> Source mode: %s\n' "$([[ $mode == 0 ]] && echo 'upstream archive; no Git prefetch' || echo 'version-pinned Git cache')"
+    printf '==> Cache: %s\n==> Output: %s\n==> Parallel jobs: %s\n' "$cache" "$output" "$jobs_count"
+    if docker info >/dev/null 2>&1; then
+        echo '==> Docker: reachable'
+    else
+        echo '==> Docker: unavailable now; a normal build can start a stopped local service'
+    fi
+    local path probe
+    for path in "$cache" "$output"; do
+        probe=$path
+        while [[ ! -d $probe ]]; do probe=$(dirname -- "$probe"); done
+        df -h -- "$probe"
+    done
+    echo '==> No image pull, network download or container run was attempted.'
+    echo '==> Remote download reachability and sufficient build disk/RAM still need checking on the builder.'
+}
+
+update_checkout() {
+    local root=$1
+    command -v git >/dev/null
+    [[ ${CI:-} != true && $(git -C "$root" branch --show-current) == cachyos-znver4 ]] || {
+        echo >&2 '--update requires a local cachyos-znver4 branch outside CI'
+        return 1
+    }
+    [[ -z $(git -C "$root" status --porcelain) ]] || {
+        echo >&2 'Commit or stash local changes before --update; no files were changed'
+        return 1
+    }
+    if [[ -n ${CACHYOS_PROXY_URL:-} ]]; then
+        [[ $CACHYOS_PROXY_URL == http://* && $CACHYOS_PROXY_URL != *[[:space:]]* ]] || {
+            echo >&2 'CACHYOS_PROXY_URL must use the HTTP/mixed listener'
+            return 1
+        }
+        # Function-local exports reach Git without changing the caller's route
+        # or putting proxy credentials in process arguments.
+        local -x http_proxy=$CACHYOS_PROXY_URL https_proxy=$CACHYOS_PROXY_URL
+        local -x HTTP_PROXY=$CACHYOS_PROXY_URL HTTPS_PROXY=$CACHYOS_PROXY_URL
+    fi
+    git -C "$root" fetch origin refs/heads/cachyos-znver4
+    git -C "$root" merge --ff-only FETCH_HEAD
+}
+
+lock_package_cache() {
+    local base=$1
+    mkdir -p "$base/pacman"
+    # Returned to the caller for the container bind mount. Serialize the entire
+    # container use so two pacman processes cannot race on the same .part file.
+    # shellcheck disable=SC2034
+    package_cache=$(realpath "$base/pacman")
+    exec 7>"$base/.packages.lock"
+    flock -n 7 || { echo >&2 'Another container is using the package download cache'; return 1; }
+}
+
 load_build_config() {
     local config_file=${CACHYOS_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/ungoogled-chromium-cachyos/build.env}
     local key
