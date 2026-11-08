@@ -7,9 +7,52 @@ end-to-end validated.
 
 ## One-command build
 
-Requirements: Linux with a compatible Zen 4 CPU, Docker access, Bash, Git,
-coreutils, `flock`, Python 3 and `bsdtar` (`libarchive` on CachyOS). Run as an
-ordinary user. Keep enough RAM/disk for a full Chromium build.
+Requirements: Linux with a compatible Zen 4 CPU, Bash, Git, coreutils,
+`flock`, Python 3 and `bsdtar` (`libarchive` on CachyOS). Run as an ordinary
+user. Keep enough RAM and disk space for a full Chromium build.
+
+### Clean local build with Podman
+
+Install Podman once on CachyOS. This mode does not need a Docker installation,
+daemon or socket. Run the build script without `sudo`:
+
+```bash
+sudo pacman -S --needed podman
+./cachyos-build.sh --check --clean
+./cachyos-build.sh --update --clean
+```
+
+Pull this version of the script into your existing `cachyos-znver4` checkout
+before using `--clean`. `--update` is optional. If you only want to fetch the
+new recipe and check the host, use `--update --check --clean`.
+
+The build uses the same CachyOS Zen 4 image and package verification. It gives
+rootless Podman a private image store and puts all source, dependency and build
+data in one temporary directory. After successful verification, the output
+directory contains only the `.pkg.tar.zst` and `SHA256SUMS`. The script deletes
+this invocation's build directory and its small runtime directory under `/tmp`.
+Existing Docker/Podman
+images, caches and previous output directories are outside that scope.
+
+Rootless Podman needs working Linux user namespaces and subordinate UID/GID
+ranges for your user. `getsubids "$(id -un)"` and `getsubids -g "$(id -un)"` show
+the assignments. If these are missing, follow the
+[Arch rootless Podman setup](https://wiki.archlinux.org/title/Podman#Rootless_Podman).
+`--check --clean` prints the Podman version, CPU check and filesystem space
+without initializing a store. The real build checks store isolation before
+pulling an image.
+
+Temporary data defaults to a directory under your home filesystem so it does
+not fill a RAM-backed `/tmp`. Set `CACHYOS_CLEAN_PARENT` to an existing writable
+directory outside the checkout to choose a different disk. The clean mode
+downloads the image, source and packages again on every run. The build tool
+and the checkout stay installed. A failed build keeps diagnostics in the output
+directory and attempts to remove temporary storage; it prints the temporary
+paths if cleanup fails. Forced termination or power loss can leave temporary data.
+
+### Cached build with Docker
+
+This mode requires Docker access. It retains images and downloads for retries:
 
 ```bash
 ./cachyos-build.sh
@@ -24,7 +67,7 @@ The source method follows PKGBUILD automatically:
   depot_tools checkout or Python 3.13 prefetch container is needed.
 - `_manual_clone=1`: prepare/reuse the version-pinned Git source cache.
   Interrupted downloads resume in staging; prefetch and compilation use the
-  same resolved Docker image.
+  same resolved image.
 
 Source archives and Pacman packages are cached between attempts. This avoids
 downloading unchanged dependencies again when retrying a failed build; it does
@@ -93,9 +136,10 @@ environment survives sudo inside the disposable container, including when
 makepkg installs dependencies. TLS/signature checks stay enabled; the host's
 sudoers file is not changed.
 
-A loopback proxy automatically selects `--network host` on normal Linux
-Docker Engine so the container can reach the laptop's listener. A non-loopback
-proxy uses bridge networking by default. Host networking shares the host's
+A loopback proxy automatically selects `--network host` on local Linux
+Podman or Docker Engine so the container can reach the laptop's listener.
+Otherwise Podman uses its rootless network and Docker uses its bridge.
+Host networking shares the host's
 network namespace. For remote/rootless Docker contexts, use a proxy address
 reachable from that Docker host, rather than your laptop's `127.0.0.1`.
 
@@ -112,15 +156,18 @@ the two variants disagree. Environment variables override the saved config;
 For a temporary override (works from fish or Bash):
 
 ```bash
-env CACHYOS_PROXY_URL=http://127.0.0.1:YOUR_PORT ./cachyos-build.sh
+env CACHYOS_PROXY_URL=http://127.0.0.1:YOUR_PORT ./cachyos-build.sh --clean
 ```
 
 Keep proxy passwords in the local file or an Actions secret. The helpers pass
-proxy variable names to Docker without logging their values or putting values
-in Docker's command arguments. Download programs may still report network
+proxy variable names to the engine without logging their values or putting
+values in command arguments. Download programs may still report network
 details in their own diagnostics; inspect logs before sharing them.
 
 ### Docker image pulls need the daemon's proxy
+
+With `--clean`, the Podman client uses the saved proxy for the image pull
+as well as for downloads inside the container.
 
 Container environment variables do not configure the Docker daemon's image
 pulls. If `docker pull` is blocked, configure that daemon separately once.
@@ -248,7 +295,7 @@ remains **8**, including Ninja, Make and compression. Upstream system Clang,
 disabled Chrome PGO, ThinLTO, codecs, VA-API, Wayland/PipeWire and UC patches
 are preserved.
 
-Both helpers share this layout:
+Cached Docker builds share this layout with the standalone prefetch helper:
 
 ```text
 ~/.cache/ungoogled-chromium-cachyos/
@@ -273,8 +320,8 @@ In archive mode this switch is unnecessary: no Git prefetch is attempted.
 
 Each build uses a fresh `~/Downloads/ungoogled-chromium-builds/TIMESTAMP-PID/` directory. An explicit
 `CACHYOS_OUTPUT_DIR` must be empty. The source cache is read-only during build.
-Cancellation removes the prefetch/build container while preserving caches/logs.
-Outputs include the package, checksums, archive metadata, build environment,
+Cached builds remove the prefetch/build container while preserving caches/logs.
+Their outputs include the package, checksums, archive metadata, build environment,
 package list and logs. Actions artifacts last 30 days; diagnostics last 7 days.
 Actions temporary output directories may be cleaned after the job.
 
@@ -284,17 +331,17 @@ archives. .BUILDINFO/provenance are metadata, not proof of source-to-binary
 correspondence. The image and upgraded container packages are recorded, without
 a reproducible-build guarantee.
 
-To verify and install:
+To verify and install a clean-build output:
 
 ```bash
-./scripts/verify-package.sh /path/to/output
 cd /path/to/output
 sha256sum -c SHA256SUMS
 sudo pacman -U ./ungoogled-chromium-*.pkg.tar.zst
 ```
 
-The verifier requires exactly one package of the expected name, version,
-filename and v4 architecture, reading .PKGINFO directly.
+The build already ran `scripts/verify-package.sh`, which requires exactly one
+package of the expected name, version, filename and v4 architecture, reading
+.PKGINFO directly. Re-running it also writes inspection metadata files.
 
 ## Maintain and validate
 
@@ -305,11 +352,13 @@ updates still need a new build.
 
 ```bash
 python3 -m unittest discover -s tests -v
-shellcheck -x cachyos-build.sh prefetch-chromium.sh fetch-chromium-release scripts/*.sh
+shellcheck -x cachyos-build.sh prefetch-chromium.sh fetch-chromium-release scripts/*.sh tests/*.sh
 actionlint
 ```
 
 Offline tests cover identity/checksums, cache publication/version pinning,
 cancellation, locks, config overrides, proxy propagation and route errors.
-They do not download Chromium or run real containers. Hosted checks use real
-archive tools. A full compile/install remains a separate validation step.
+They do not download Chromium or run real containers. Hosted pull requests
+also use a tiny locally imported image to test actual Podman ownership mapping
+and isolation from another image store. A full compile/install remains a
+separate validation step.
