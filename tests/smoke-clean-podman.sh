@@ -26,6 +26,7 @@ cleanup() {
     exit "$rc"
 }
 trap cleanup EXIT
+trap 'printf >&2 "Podman smoke test failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND"' ERR
 
 mkdir -p "$scratch/rootfs"/{bin,etc,home/notroot,probe} "$scratch/probe"
 mkdir -m 700 -- "$runtime_root"/{build,other}
@@ -48,8 +49,17 @@ build_ready=true
 image=$(container_cli import --change 'USER 1000:1000' "$scratch/image.tar" localhost/build-fixture:latest)
 # shellcheck disable=SC2016 # Run the substitution in the container.
 container_run --rm --init --name clean-smoke --network none -v "$scratch/probe:/probe" \
-    "$image" /bin/sh -c 'test "$(/bin/busybox id -u)" = 1000 && echo done > /probe/result'
-[[ $(stat -c '%u:%g' "$scratch/probe/result") == "$(id -u):$(id -g)" ]]
+    "$image" /bin/sh -c '
+        ids="$(/bin/busybox id -u):$(/bin/busybox id -g)"
+        printf "Container UID:GID: %s\n" "$ids"
+        test "$ids" = 1000:1000 || exit 18
+        echo done > /probe/result
+    '
+owner=$(stat -c '%u:%g' "$scratch/probe/result")
+caller="$(id -u):$(id -g)"
+printf 'Bind-mounted output UID:GID: %s (host caller: %s)\n' "$owner" "$caller"
+[[ $owner == "$caller" ]]
+echo 'Removing the private Podman store'
 container_cli system reset --force >/dev/null
 build_ready=false
 [[ ! -e $podman_state/graph && ! -e $podman_runtime/run ]]
