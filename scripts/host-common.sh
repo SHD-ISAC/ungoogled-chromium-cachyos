@@ -254,7 +254,8 @@ prepare_clean_store() {
     local state=$1 runtime=$2 resolved
     mkdir -m 700 -- "$state" "$state"/{config,cache,data,tmp} || return
     : > "$state/containers.conf" || return
-    printf '[storage]\n' > "$state/storage.conf" || return
+    # Keep the driver explicit for both Podman and its UID-map helper process.
+    printf '[storage]\ndriver = "overlay"\n' > "$state/storage.conf" || return
     resolved=$(container_cli info --format '{{.Store.GraphRoot}}|{{.Store.RunRoot}}|{{.Store.VolumePath}}|{{.Host.Security.Rootless}}') || {
         echo >&2 'Cannot start rootless Podman. Check user namespaces and subordinate UID/GID ranges; see CACHYOS.md.'
         return 1
