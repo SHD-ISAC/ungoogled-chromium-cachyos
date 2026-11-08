@@ -2,15 +2,15 @@
 # Shared host setup. Proxy settings apply to child containers, not the desktop.
 
 require_build_tools() {
-    local tool missing=0
-    for tool in docker bsdtar git flock lscpu python3 realpath find tee sha256sum tar; do
+    local engine=${1:-docker} tool missing=0
+    for tool in "$engine" bsdtar git flock lscpu python3 realpath find tee sha256sum tar; do
         if ! command -v "$tool" >/dev/null; then
             echo >&2 "Missing command: $tool"
             missing=1
         fi
     done
     ((missing == 0)) || {
-        echo >&2 'On CachyOS, install missing host tools from docker, libarchive, git, util-linux, python and coreutils.'
+        echo >&2 "On CachyOS, install missing host tools from $engine, libarchive, git, util-linux, python and coreutils."
         return 1
     }
 }
@@ -29,15 +29,23 @@ verify_build_cpu() {
 }
 
 check_build_environment() {
-    local root=$1 mode=$2 cache=$3 output=$4 jobs_count=$5
-    require_build_tools
+    local root=$1 mode=$2 cache=$3 output=$4 jobs_count=$5 engine=${6:-docker}
+    require_build_tools "$engine"
     verify_build_cpu
-    container_network
+    container_network "$engine"
     printf '==> Host tools and baseline x86-64-v4 flags: OK\n'
     printf '==> Recipe: %s\n' "$(sed -n 's/^pkgver=//p' "$root/PKGBUILD")"
     printf '==> Source mode: %s\n' "$([[ $mode == 0 ]] && echo 'upstream archive; no Git prefetch' || echo 'version-pinned Git cache')"
-    printf '==> Cache: %s\n==> Output: %s\n==> Parallel jobs: %s\n' "$cache" "$output" "$jobs_count"
-    if docker info >/dev/null 2>&1; then
+    if [[ $engine == podman ]]; then
+        printf '==> Disposable workspace parent: %s\n' "$cache"
+        podman --version
+    else
+        printf '==> Cache: %s\n' "$cache"
+    fi
+    printf '==> Output: %s\n==> Parallel jobs: %s\n' "$output" "$jobs_count"
+    if [[ $engine == podman ]]; then
+        echo '==> Rootless Podman storage will be initialized only when a build starts.'
+    elif docker info >/dev/null 2>&1; then
         echo '==> Docker: reachable'
     else
         echo '==> Docker: unavailable now; a normal build can start a stopped local service'
@@ -92,7 +100,7 @@ load_build_config() {
     local config_file=${CACHYOS_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/ungoogled-chromium-cachyos/build.env}
     local key
     local -a settings=(CACHYOS_MAKEPKG_IMAGE CACHYOS_IMAGE_PULL CHROMIUM_BUILD_JOBS
-        CHROMIUM_CACHE_DIR CACHYOS_OUTPUT_DIR CACHYOS_AUTO_PREFETCH CACHYOS_START_DOCKER
+        CHROMIUM_CACHE_DIR CACHYOS_OUTPUT_DIR CACHYOS_AUTO_PREFETCH CACHYOS_START_DOCKER CACHYOS_CLEAN_PARENT
         CACHYOS_PROXY_URL CACHYOS_DOCKER_NETWORK CACHYOS_RUNNER_DIR CACHYOS_RUNNER_PROXY_URL
         http_proxy https_proxy all_proxy no_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY)
     local -A supplied=()
@@ -143,25 +151,29 @@ resolve_build_image() {
     local image=$1 policy=${CACHYOS_IMAGE_PULL:-always} attempt rc=1
     case $policy in
         always) ;;
-        missing) if docker image inspect "$image" >/dev/null 2>&1; then policy=never; fi ;;
+        missing) if container_cli image inspect "$image" >/dev/null 2>&1; then policy=never; fi ;;
         never) ;;
         *) echo >&2 'CACHYOS_IMAGE_PULL must be always, missing or never'; return 1 ;;
     esac
     if [[ $policy != never ]]; then
         for attempt in 1 2 3; do
-            if docker pull "$image"; then rc=0; break; else rc=$?; fi
-            echo >&2 "warning: image pull failed ($attempt/3). Docker image pulls need the daemon's own proxy settings."
+            if container_cli pull "$image"; then rc=0; break; else rc=$?; fi
+            if [[ -n ${podman_state:-} ]]; then
+                echo >&2 "warning: image pull failed ($attempt/3). Check the Podman client's proxy connection."
+            else
+                echo >&2 "warning: image pull failed ($attempt/3). Docker image pulls need the daemon's own proxy settings."
+            fi
             if ((attempt < 3)); then sleep 5; fi
         done
         ((rc == 0)) || return "$rc"
     fi
     # shellcheck disable=SC2034 # Returned to callers without using stdout.
-    image_id=$(docker image inspect --format '{{.Id}}' "$image")
+    image_id=$(container_cli image inspect --format '{{.Id}}' "$image")
     [[ -n $image_id ]] || { echo >&2 'Could not resolve build image'; return 1; }
 }
 
 container_network() {
-    local lower upper value host network=${CACHYOS_DOCKER_NETWORK:-auto}
+    local engine=${1:-docker} lower upper value host network=${CACHYOS_DOCKER_NETWORK:-auto}
     # These arrays are consumed by the host entry points.
     # shellcheck disable=SC2034
     container_network_args=()
@@ -185,7 +197,7 @@ container_network() {
             printf -v "$lower" '%s' "$value"
             printf -v "$upper" '%s' "$value"
             export "${lower?}" "${upper?}"
-            # Pass names only: do not put proxy credentials in Docker's argv.
+            # Pass names only: do not put proxy credentials in the engine's argv.
             container_proxy_args+=(-e "$lower" -e "$upper")
         fi
         [[ $lower == no_proxy ]] && continue
@@ -206,11 +218,59 @@ container_network() {
         echo >&2 'A loopback proxy requires CACHYOS_DOCKER_NETWORK=host on Linux'
         return 1
     fi
-    container_network_args+=(--network "$network")
+    # Let Podman select its rootless network backend (pasta on CachyOS).
+    if [[ $engine == docker || $network == host ]]; then
+        container_network_args+=(--network "$network")
+    fi
     # The normal Linux host backend is needed to reach its loopback listener.
     # A remote daemon has a different loopback address; reject misleading URLs.
-    if [[ $loopback == true && ( -n ${DOCKER_HOST:-} || $(docker context show 2>/dev/null) != default ) ]]; then
+    if [[ $engine == docker && $loopback == true &&
+        ( -n ${DOCKER_HOST:-} || $(docker context show 2>/dev/null) != default ) ]]; then
         echo >&2 'Use a proxy address reachable from the Docker host for a remote/rootless Docker context'
         return 1
     fi
+}
+
+container_cli() {
+    local state=${podman_state:-}
+    if [[ -z $state ]]; then
+        docker "$@"
+        return
+    fi
+    # The private XDG paths also cover the rootless pause process, image
+    # download staging, and machine/connection metadata used by system reset.
+    env -u CONTAINER_HOST -u CONTAINER_CONNECTION -u PODMAN_CONNECTIONS_CONF \
+        -u CONTAINERS_CONF_OVERRIDE -u STORAGE_DRIVER -u STORAGE_OPTS -u PODMAN_USERNS \
+        XDG_CONFIG_HOME="$state/config" XDG_CACHE_HOME="$state/cache" \
+        XDG_DATA_HOME="$state/data" XDG_RUNTIME_DIR="$state/runtime" TMPDIR="$state/tmp" \
+        CONTAINERS_CONF="$state/containers.conf" CONTAINERS_STORAGE_CONF="$state/storage.conf" \
+        podman --remote=false --root "$state/graph" --runroot "$state/run" \
+        --tmpdir "$state/libpod" --volumepath "$state/volumes" \
+        --events-backend=none --cgroup-manager=cgroupfs "$@"
+}
+
+prepare_clean_store() {
+    local state=$1 resolved
+    mkdir -m 700 -- "$state" "$state"/{config,cache,data,runtime,tmp} || return
+    : > "$state/containers.conf" || return
+    printf '[storage]\n' > "$state/storage.conf" || return
+    resolved=$(container_cli info --format '{{.Store.GraphRoot}}|{{.Store.RunRoot}}|{{.Store.VolumePath}}|{{.Host.Security.Rootless}}') || {
+        echo >&2 'Cannot start rootless Podman. Check user namespaces and subordinate UID/GID ranges; see CACHYOS.md.'
+        return 1
+    }
+    [[ $resolved == "$state/graph|$state/run|$state/volumes|true" ]] || {
+        echo >&2 'Podman did not resolve to the private rootless store; refusing to use or reset it.'
+        return 1
+    }
+}
+
+container_run() {
+    local -a rootless_args=()
+    if [[ -n ${podman_state:-} ]]; then
+        # The official image's notroot account owns the bind mounts inside
+        # the container. The same files belong to the caller on the host.
+        rootless_args=('--userns=keep-id:uid=1000,gid=1000' --user=1000:1000
+            --cgroups=disabled --log-driver=k8s-file --pull=never)
+    fi
+    container_cli run "${rootless_args[@]}" "$@"
 }

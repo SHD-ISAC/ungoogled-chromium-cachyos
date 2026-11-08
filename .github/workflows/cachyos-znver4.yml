@@ -52,10 +52,17 @@ jobs:
       - name: Validate helpers and workflow
         run: |
           set -euo pipefail
-          for script in PKGBUILD fetch-chromium-release ./*.sh scripts/*.sh; do bash -n "$script"; done
+          for script in PKGBUILD fetch-chromium-release ./*.sh scripts/*.sh tests/*.sh; do bash -n "$script"; done
           python3 -m unittest discover -s tests -v
-          shellcheck -x cachyos-build.sh prefetch-chromium.sh fetch-chromium-release scripts/*.sh
+          shellcheck -x cachyos-build.sh prefetch-chromium.sh fetch-chromium-release scripts/*.sh tests/*.sh
           "$RUNNER_TEMP/actionlint"
+
+      - name: Smoke-test rootless Podman cleanup
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends podman uidmap busybox-static catatonit
+          bash tests/smoke-clean-podman.sh
 
       - name: Check release inputs before using the build machine
         if: ${{ startsWith(github.ref, 'refs/tags/znver4-') }}

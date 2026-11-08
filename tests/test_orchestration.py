@@ -276,9 +276,9 @@ esac''')
         (remote / "cachyos-build.sh").write_text('#!/usr/bin/env bash\nprintf "updated:%s" "$*"\n')
         self.git(remote, "add", ".")
         self.git(remote, "commit", "-qm", "updated helper")
-        result = self.run_script("cachyos-build.sh", "--update", "--check")
+        result = self.run_script("cachyos-build.sh", "--update", "--check", "--clean")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("updated:--check", result.stdout)
+        self.assertIn("updated:--check --clean", result.stdout)
         self.assertEqual(self.git(self.root, "rev-parse", "HEAD"), self.git(remote, "rev-parse", "HEAD"))
 
     def test_update_preserves_uncommitted_changes_and_does_not_fetch(self):

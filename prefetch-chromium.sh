@@ -6,6 +6,9 @@ cd "$repo_root"
 # shellcheck source=scripts/host-common.sh
 source "$repo_root/scripts/host-common.sh"
 load_build_config
+# Only the parent clean build supplies a private Podman store; standalone
+# prefetch retains the Docker/cache behavior.
+podman_state=${CACHYOS_INTERNAL_PODMAN_DIR:-}
 version="${1:-$(sed -n 's/^pkgver=//p' PKGBUILD)}"
 [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
     echo >&2 'Expected a Chromium version such as 153.0.8010.47'
@@ -40,7 +43,7 @@ builder_name="ungoogled-chromium-prefetch-$(id -u)-$$"
 cleanup() {
     local rc=$?
     trap - EXIT
-    docker rm -f "$builder_name" >/dev/null 2>&1 || true
+    container_cli rm -f "$builder_name" >/dev/null 2>&1 || true
     exit "$rc"
 }
 trap cleanup EXIT
@@ -49,11 +52,15 @@ trap 'exit 143' TERM
 
 echo "==> Prefetching Chromium $version into $target"
 if [[ ! -f $stage/chromium-$version/.ungoogled-chromium-cache-complete ]]; then
-    ensure_docker
-    container_network
+    if [[ -n $podman_state ]]; then
+        container_network podman
+    else
+        ensure_docker
+        container_network docker
+    fi
     resolve_build_image "$image"
     lock_package_cache "$cache_base"
-    docker run --rm --init --name "$builder_name" \
+    container_run --rm --init --name "$builder_name" \
         "${container_network_args[@]}" "${container_proxy_args[@]}" \
         -e CHROMIUM_VERSION="$version" -e GIT_CACHE_PATH=/git-cache \
         -v "$repo_root:/recipe:ro" -v "$stage:/work" -v "$git_cache:/git-cache" \

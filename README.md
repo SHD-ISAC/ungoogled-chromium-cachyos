@@ -1,8 +1,9 @@
 # ungoogled-chromium-archlinux
 
-**CachyOS fork:** `./cachyos-build.sh --update` updates and builds on your
-Zen 4 runner; `--check` inspects the host without compiling. Sources follow
-the upstream archive/Git mode, and downloads are cached across attempts.
+**CachyOS fork:** `./cachyos-build.sh --update --clean` uses rootless Podman
+for a disposable local Zen 4 build and keeps only the package and checksum.
+Use `--check --clean` to inspect the host first. The existing Docker path
+without `--clean` keeps its download caches for repeat builds.
 Proxy settings can be saved once; GitHub handles validation and
 release publishing separately. See [CACHYOS.md](CACHYOS.md) for setup and remote
 builder options. The upstream README below is retained for reference.
