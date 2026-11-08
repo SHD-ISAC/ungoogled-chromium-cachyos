@@ -235,7 +235,7 @@ container_cli() {
     local state=${podman_state:-} runtime=${podman_runtime:-}
     if [[ -z $state ]]; then
         docker "$@"
-        return
+        return "$?"
     fi
     [[ -n $runtime ]] || { echo >&2 'A private Podman runtime directory is required'; return 1; }
     # The private XDG paths also cover the rootless pause process, image
@@ -264,6 +264,14 @@ prepare_clean_store() {
         echo >&2 'Podman did not resolve to the private rootless store; refusing to use or reset it.'
         return 1
     }
+}
+
+remove_clean_store() {
+    local state=${podman_state:?private Podman store required}
+    local runtime=${podman_runtime:?private Podman runtime required}
+    container_cli system reset --force >/dev/null || return 1
+    # Remove any private bookkeeping left by the engine after its reset.
+    rm -rf --one-file-system -- "$state" "$runtime"
 }
 
 container_run() {

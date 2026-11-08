@@ -15,12 +15,12 @@ cleanup() {
     if [[ $build_ready == true ]]; then
         podman_state="$scratch/build"
         podman_runtime="$runtime_root/build"
-        container_cli system reset --force >/dev/null || rc=1
+        remove_clean_store || rc=1
     fi
     if [[ $other_ready == true ]]; then
         podman_state="$scratch/other"
         podman_runtime="$runtime_root/other"
-        container_cli system reset --force >/dev/null || rc=1
+        remove_clean_store || rc=1
     fi
     rm -rf --one-file-system -- "$scratch" "$runtime_root" || rc=1
     exit "$rc"
@@ -60,9 +60,9 @@ caller="$(id -u):$(id -g)"
 printf 'Bind-mounted output UID:GID: %s (host caller: %s)\n' "$owner" "$caller"
 [[ $owner == "$caller" ]]
 echo 'Removing the private Podman store'
-container_cli system reset --force >/dev/null
+remove_clean_store
 build_ready=false
-[[ ! -e $podman_state/graph && ! -e $podman_runtime/run ]]
+[[ ! -e $podman_state && ! -e $podman_runtime ]]
 
 podman_state="$scratch/other"
 podman_runtime="$runtime_root/other"

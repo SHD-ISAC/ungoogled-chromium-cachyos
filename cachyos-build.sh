@@ -107,7 +107,7 @@ cleanup() {
             done
         fi
         # Reset only the verified private store, never the user's usual store.
-        if { [[ $private_store_ready == true ]] && ! container_cli system reset --force >/dev/null; } ||
+        if { [[ $private_store_ready == true ]] && ! remove_clean_store; } ||
             ! rm -rf --one-file-system -- "${workdirs[@]}"; then
             printf >&2 'Clean build cleanup failed; temporary directories:\n  %s\n' "${workdirs[@]}"
             if ((rc == 0)); then rc=1; fi
