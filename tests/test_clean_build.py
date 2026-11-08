@@ -2,6 +2,8 @@
 import hashlib
 import io
 import os
+from pathlib import Path
+import shutil
 import tarfile
 import unittest
 
@@ -15,6 +17,8 @@ class CleanBuild(HelperFixtures):
         self.parent = self.work / "temporary builds"
         self.parent.mkdir()
         self.output = self.work / "result"
+        self.runtime_log = self.work / "runtimes"
+        self.addCleanup(self.remove_test_runtimes)
         self.original = self.work / "existing-podman"
         self.original.mkdir()
         (self.original / "keep").write_text("existing image")
@@ -26,7 +30,8 @@ class CleanBuild(HelperFixtures):
         self.env.update(CACHYOS_CLEAN_PARENT=str(self.parent), CACHYOS_OUTPUT_DIR=str(self.output),
                         CACHYOS_IMAGE_PULL="never", XDG_DATA_HOME=str(self.original),
                         CONTAINER_HOST="ssh://fixture.invalid", CONTAINERS_CONF_OVERRIDE=str(self.original / "conf"),
-                        TEST_PARENT=str(self.parent), TEST_PACKAGE=str(self.package))
+                        TEST_PARENT=str(self.parent), TEST_PACKAGE=str(self.package),
+                        TEST_RUNTIME_LOG=str(self.runtime_log))
         self.mock("docker", 'echo "unexpected Docker command" >> "$TEST_LOG"; exit 99')
         self.mock("podman", r'''
 echo "$*" >> "$TEST_LOG"
@@ -44,9 +49,11 @@ while [[ $1 == --* ]]; do
     esac
     shift
 done
-for path in "$graph" "$runroot" "$volumes" "$XDG_DATA_HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"; do
+for path in "$graph" "$volumes" "$XDG_DATA_HOME" "$TMPDIR"; do
     [[ $path == "$TEST_PARENT"/.uc-build.*/* ]]
 done
+[[ $XDG_RUNTIME_DIR == /tmp/ucp.* && $runroot == "$XDG_RUNTIME_DIR/run" && ${#runroot} -le 50 ]]
+printf '%s\n' "$XDG_RUNTIME_DIR" >> "$TEST_RUNTIME_LOG"
 case $1 in
     info) printf '%s|%s|%s|true\n' "${TEST_REPORTED_ROOT:-$graph}" "$runroot" "$volumes" ;;
     pull)
@@ -98,6 +105,16 @@ esac''')
                 entry.size = len(payload)
                 archive.addfile(entry, io.BytesIO(payload))
 
+    def runtime_paths(self):
+        if not self.runtime_log.exists():
+            return set()
+        return {Path(p) for p in self.runtime_log.read_text().splitlines()}
+
+    def remove_test_runtimes(self):
+        for path in self.runtime_paths():
+            if path.parent == Path("/tmp") and path.name.startswith("ucp.") and path.is_dir():
+                shutil.rmtree(path)
+
     def assert_original_state_untouched(self):
         self.assertEqual((self.original / "keep").read_text(), "existing image")
         self.assertEqual((self.work / "cache/keep").read_text(), "existing downloads")
@@ -111,6 +128,8 @@ esac''')
         digest = hashlib.sha256((self.output / self.package.name).read_bytes()).hexdigest()
         self.assertEqual((self.output / "SHA256SUMS").read_text(), f"{digest}  {self.package.name}\n")
         self.assertEqual(list(self.parent.iterdir()), [])
+        self.assertTrue(self.runtime_paths())
+        self.assertTrue(all(not p.exists() for p in self.runtime_paths()))
         self.assert_original_state_untouched()
         commands = self.log.read_text()
         self.assertIn("pull docker.io/cachyos/docker-makepkg-znver4:latest", commands)

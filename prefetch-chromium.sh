@@ -9,6 +9,7 @@ load_build_config
 # Only the parent clean build supplies a private Podman store; standalone
 # prefetch retains the Docker/cache behavior.
 podman_state=${CACHYOS_INTERNAL_PODMAN_DIR:-}
+podman_runtime=${CACHYOS_INTERNAL_PODMAN_RUNTIME:-}
 version="${1:-$(sed -n 's/^pkgver=//p' PKGBUILD)}"
 [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
     echo >&2 'Expected a Chromium version such as 153.0.8010.47'

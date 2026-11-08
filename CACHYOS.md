@@ -30,7 +30,8 @@ The build uses the same CachyOS Zen 4 image and package verification. It gives
 rootless Podman a private image store and puts all source, dependency and build
 data in one temporary directory. After successful verification, the output
 directory contains only the `.pkg.tar.zst` and `SHA256SUMS`. The script deletes
-this invocation's temporary store and directory. Existing Docker/Podman
+this invocation's build directory and its small runtime directory under `/tmp`.
+Existing Docker/Podman
 images, caches and previous output directories are outside that scope.
 
 Rootless Podman needs working Linux user namespaces and subordinate UID/GID
@@ -47,7 +48,7 @@ directory outside the checkout to choose a different disk. The clean mode
 downloads the image, source and packages again on every run. The build tool
 and the checkout stay installed. A failed build keeps diagnostics in the output
 directory and attempts to remove temporary storage; it prints the temporary
-path if cleanup fails. Forced termination or power loss can leave that directory.
+paths if cleanup fails. Forced termination or power loss can leave temporary data.
 
 ### Cached build with Docker
 

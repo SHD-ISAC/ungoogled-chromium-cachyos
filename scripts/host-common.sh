@@ -232,33 +232,34 @@ container_network() {
 }
 
 container_cli() {
-    local state=${podman_state:-}
+    local state=${podman_state:-} runtime=${podman_runtime:-}
     if [[ -z $state ]]; then
         docker "$@"
         return
     fi
+    [[ -n $runtime ]] || { echo >&2 'A private Podman runtime directory is required'; return 1; }
     # The private XDG paths also cover the rootless pause process, image
     # download staging, and machine/connection metadata used by system reset.
     env -u CONTAINER_HOST -u CONTAINER_CONNECTION -u PODMAN_CONNECTIONS_CONF \
         -u CONTAINERS_CONF_OVERRIDE -u STORAGE_DRIVER -u STORAGE_OPTS -u PODMAN_USERNS \
         XDG_CONFIG_HOME="$state/config" XDG_CACHE_HOME="$state/cache" \
-        XDG_DATA_HOME="$state/data" XDG_RUNTIME_DIR="$state/runtime" TMPDIR="$state/tmp" \
+        XDG_DATA_HOME="$state/data" XDG_RUNTIME_DIR="$runtime" TMPDIR="$state/tmp" \
         CONTAINERS_CONF="$state/containers.conf" CONTAINERS_STORAGE_CONF="$state/storage.conf" \
-        podman --remote=false --root "$state/graph" --runroot "$state/run" \
-        --tmpdir "$state/libpod" --volumepath "$state/volumes" \
+        podman --remote=false --root "$state/graph" --runroot "$runtime/run" \
+        --tmpdir "$runtime/libpod" --volumepath "$state/volumes" \
         --events-backend=none --cgroup-manager=cgroupfs "$@"
 }
 
 prepare_clean_store() {
-    local state=$1 resolved
-    mkdir -m 700 -- "$state" "$state"/{config,cache,data,runtime,tmp} || return
+    local state=$1 runtime=$2 resolved
+    mkdir -m 700 -- "$state" "$state"/{config,cache,data,tmp} || return
     : > "$state/containers.conf" || return
     printf '[storage]\n' > "$state/storage.conf" || return
     resolved=$(container_cli info --format '{{.Store.GraphRoot}}|{{.Store.RunRoot}}|{{.Store.VolumePath}}|{{.Host.Security.Rootless}}') || {
         echo >&2 'Cannot start rootless Podman. Check user namespaces and subordinate UID/GID ranges; see CACHYOS.md.'
         return 1
     }
-    [[ $resolved == "$state/graph|$state/run|$state/volumes|true" ]] || {
+    [[ $resolved == "$state/graph|$runtime/run|$state/volumes|true" ]] || {
         echo >&2 'Podman did not resolve to the private rootless store; refusing to use or reset it.'
         return 1
     }

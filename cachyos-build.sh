@@ -81,6 +81,7 @@ prefetch_pid=''
 builder_started=false
 clean_workspace=''
 podman_state=''
+podman_runtime=''
 private_store_ready=false
 build_output=$output_dir
 cleanup() {
@@ -94,6 +95,8 @@ cleanup() {
         container_cli rm -f "$builder_name" >/dev/null 2>&1 || true
     fi
     if [[ -n $clean_workspace ]]; then
+        local -a workdirs=("$clean_workspace")
+        if [[ -n $podman_runtime ]]; then workdirs+=("$podman_runtime"); fi
         if ((rc != 0)); then
             local item
             for item in build.log prefetch.log build-environment.txt build-packages.txt logs; do
@@ -105,8 +108,8 @@ cleanup() {
         fi
         # Reset only the verified private store, never the user's usual store.
         if { [[ $private_store_ready == true ]] && ! container_cli system reset --force >/dev/null; } ||
-            ! rm -rf --one-file-system -- "$clean_workspace"; then
-            echo >&2 "Clean build cleanup failed; temporary workspace: $clean_workspace"
+            ! rm -rf --one-file-system -- "${workdirs[@]}"; then
+            printf >&2 'Clean build cleanup failed; temporary directories:\n  %s\n' "${workdirs[@]}"
             if ((rc == 0)); then rc=1; fi
         fi
     fi
@@ -124,9 +127,12 @@ if [[ $clean == true ]]; then
     cache_base="$clean_workspace/cache"
     build_output="$clean_workspace/output"
     podman_state="$clean_workspace/podman"
+    # Older Podman versions cap runroot at 50 characters. Keep only small
+    # runtime metadata here; image layers and downloads stay on the build disk.
+    podman_runtime=$(mktemp -d -- /tmp/ucp.XXXXXXXX)
     mkdir -- "$build_output"
     echo "==> Disposable Podman workspace: $clean_workspace"
-    prepare_clean_store "$podman_state"
+    prepare_clean_store "$podman_state" "$podman_runtime"
     private_store_ready=true
     CACHYOS_IMAGE_PULL=always
     auto_prefetch=1
@@ -159,6 +165,7 @@ elif [[ $auto_prefetch == 1 ]]; then
     # Prefetch and compile with exactly the same image. Cache hits do no download.
     env CACHYOS_MAKEPKG_IMAGE="$image_id" CACHYOS_IMAGE_PULL=never \
         CHROMIUM_CACHE_DIR="$cache_base" CACHYOS_INTERNAL_PODMAN_DIR="$podman_state" \
+        CACHYOS_INTERNAL_PODMAN_RUNTIME="$podman_runtime" \
         "$repo_root/prefetch-chromium.sh" > >(tee "$build_output/prefetch.log") 2>&1 &
     prefetch_pid=$!
     wait "$prefetch_pid"
